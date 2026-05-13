@@ -52,9 +52,10 @@ async def main():
     # --- Assistant client (real account, VC join karega) ---
     # Pehli baar chalane par phone number maangega → OTP daalo
     assistant = Client(
-        ASSISTANT_SESSION,
+        "assistant",
         api_id=API_ID,
         api_hash=API_HASH,
+        session_string=ASSISTANT_SESSION,
     )
 
     # --- Components ---
