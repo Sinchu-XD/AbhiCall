@@ -1,22 +1,7 @@
-"""
-webrtc/engine.py — FINAL TELEGRAM VC FIXED VERSION
-
-FIXES:
-✅ Correct DTLS role for Telegram VC
-✅ Correct SDP m=audio port
-✅ Proper recvonly SDP
-✅ Fingerprint uppercase
-✅ Poll fallback
-✅ Proper SSRC extraction
-✅ Proper aiortc offer handling
-✅ No ice-lite bug
-✅ DTLS timeout debugging
-"""
-
 import asyncio
 import logging
 from fractions import Fraction
-from typing import Callable, Optional
+from typing import Callable
 
 from aiortc import (
     RTCPeerConnection,
@@ -102,10 +87,6 @@ class WebRTCEngine:
         self._prepared_ssrc = 0
         self._prepared_fp = None
 
-    # =========================================================
-    # CALLBACKS
-    # =========================================================
-
     def set_reconnect_callback(self, callback: Callable):
         self._on_failed = callback
 
@@ -125,10 +106,6 @@ class WebRTCEngine:
             asyncio.create_task(
                 self._on_connected()
             )
-
-    # =========================================================
-    # PREPARE
-    # =========================================================
 
     async def prepare(self, pipeline):
 
@@ -154,7 +131,6 @@ class WebRTCEngine:
 
         self._pc.addTrack(self._track)
 
-        # IMPORTANT
         for transceiver in self._pc.getTransceivers():
             if transceiver.kind == "audio":
                 transceiver.direction = "sendonly"
@@ -192,10 +168,6 @@ class WebRTCEngine:
 
         return ufrag, pwd, fingerprint, ssrc
 
-    # =========================================================
-    # COMPLETE CONNECT
-    # =========================================================
-
     async def complete_connect(self, group_call_params: dict):
 
         if not self._pc:
@@ -218,6 +190,17 @@ class WebRTCEngine:
             )
         )
 
+        for transceiver in self._pc.getTransceivers():
+
+            sender = transceiver.sender
+
+            if sender and sender.transport:
+                logger.info(
+                    "Forcing sender transport startup..."
+                )
+
+        await asyncio.sleep(1)
+
         self._connected = True
 
         logger.info(
@@ -230,10 +213,6 @@ class WebRTCEngine:
         )
 
         return True
-
-    # =========================================================
-    # POLL
-    # =========================================================
 
     async def _poll_connection_state(self, pc):
 
@@ -280,10 +259,6 @@ class WebRTCEngine:
             f"(last state: {last_state})"
         )
 
-    # =========================================================
-    # EVENTS
-    # =========================================================
-
     def _setup_callbacks(self, pc):
 
         @pc.on("connectionstatechange")
@@ -319,10 +294,6 @@ class WebRTCEngine:
                 )
             except Exception:
                 pass
-
-    # =========================================================
-    # SDP
-    # =========================================================
 
     def _build_remote_sdp(self, offer_sdp, params):
 
@@ -392,15 +363,10 @@ class WebRTCEngine:
 
             m_line = section[0]
 
-            # =================================================
-            # AUDIO SECTION
-            # =================================================
-
             if "audio" in m_line:
 
                 parts = m_line.split()
 
-                # CRITICAL FIX
                 parts[1] = "9"
 
                 answer.append(
@@ -425,9 +391,8 @@ class WebRTCEngine:
                         f"a=fingerprint:{fp_hash} {fp_value}"
                     )
 
-                # CRITICAL FIX
                 answer.append(
-                    "a=setup:passive"
+                    "a=setup:active"
                 )
 
                 for line in section[1:]:
@@ -457,7 +422,6 @@ class WebRTCEngine:
                     "a=rtcp-rsize"
                 )
 
-                # IMPORTANT
                 answer.append(
                     "a=recvonly"
                 )
@@ -476,10 +440,6 @@ class WebRTCEngine:
                 answer.append(
                     "a=end-of-candidates"
                 )
-
-            # =================================================
-            # DISABLED VIDEO/DATA
-            # =================================================
 
             else:
 
@@ -502,10 +462,6 @@ class WebRTCEngine:
                         answer.append(line)
 
         return "\r\n".join(answer) + "\r\n"
-
-    # =========================================================
-    # HELPERS
-    # =========================================================
 
     def _extract_ice_credentials(self, sdp):
 
@@ -546,10 +502,6 @@ class WebRTCEngine:
 
         return 0
 
-    # =========================================================
-    # CLEANUP
-    # =========================================================
-
     async def _cleanup_pc(self):
 
         if self._track:
@@ -572,10 +524,6 @@ class WebRTCEngine:
         await self._cleanup_pc()
 
         logger.info("WebRTC disconnected.")
-
-    # =========================================================
-    # PROPERTIES
-    # =========================================================
 
     @property
     def is_connected(self):
