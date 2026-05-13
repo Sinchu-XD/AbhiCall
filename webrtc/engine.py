@@ -1,7 +1,9 @@
+# webrtc/engine.py
+
 import asyncio
 import logging
 from fractions import Fraction
-from typing import Callable, Optional
+from typing import Callable
 
 from aiortc import (
     RTCPeerConnection,
@@ -32,10 +34,6 @@ class SwitchableAudioTrack(MediaStreamTrack):
 
     def set_pipeline(self, pipeline):
         self._pipeline = pipeline
-
-    def switch_pipeline(self, new_pipeline):
-        self._pipeline = new_pipeline
-        logger.info("Audio pipeline switched.")
 
     async def recv(self):
 
@@ -449,30 +447,11 @@ class WebRTCEngine:
                 ""
             )
 
-            remote_setup = fingerprints[0].get(
-                "setup",
-                "actpass"
-            )
-
         else:
 
             fp_hash = "sha-256"
 
             fp_value = ""
-
-            remote_setup = "actpass"
-
-        if remote_setup == "active":
-
-            local_setup = "passive"
-
-        elif remote_setup == "passive":
-
-            local_setup = "active"
-
-        else:
-
-            local_setup = "active"
 
         ufrag = transport.get(
             "ufrag",
@@ -568,7 +547,7 @@ class WebRTCEngine:
                     )
 
                 answer.append(
-                    f"a=setup:{local_setup}"
+                    "a=setup:passive"
                 )
 
                 for line in section[1:]:
