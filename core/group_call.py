@@ -1,18 +1,14 @@
 """
-core/group_call.py — Fixed v2
+core/group_call.py — Fixed v3
 
-FIXES:
-  1. _parse_join_response now checks UpdateGroupCallConnection.params directly
-     (not update.call.params) — this is why ICE candidates were always 0.
-  2. connect_audio() calls webrtc.prepare() for real DTLS fingerprint.
-  3. _reconnecting flag always resets in finally block.
-  4. Max 5 reconnect attempts with backoff.
+KEY FIX: Uses the real SSRC from webrtc.prepare() in JoinGroupCall.
+Previously we sent a random SSRC, so Telegram could not match our
+RTP packets to the participant → every packet was dropped → silence.
 """
 
 import asyncio
 import json
 import logging
-import random
 from typing import Optional
 
 from pyrogram import Client
@@ -34,7 +30,6 @@ class GroupCallManager:
         self._chat_id: Optional[int] = None
         self._joined           = False
         self._transport_params = {}
-        self._my_ssrc          = 0
         self._pipeline         = None
         self._reconnecting     = False
         self._reconnect_count  = 0
@@ -70,27 +65,28 @@ class GroupCallManager:
         try:
             self._pipeline = pipeline
 
-            # PHASE 1: Create WebRTC PC, gather ICE, extract real fingerprint
-            ufrag, pwd, fingerprint = await self.webrtc.prepare(pipeline)
+            # PHASE 1: Create WebRTC PC, get REAL credentials
+            # Returns (ufrag, pwd, fingerprint, ssrc) — all from aiortc's offer SDP
+            ufrag, pwd, fingerprint, ssrc = await self.webrtc.prepare(pipeline)
 
             fp_parts = fingerprint.split(" ", 1)
             fp_hash  = fp_parts[0] if len(fp_parts) == 2 else "sha-256"
             fp_value = fp_parts[1] if len(fp_parts) == 2 else ""
 
-            self._my_ssrc = random.randint(1_000_000, 0x7FFFFFFF)
-
             join_params = {
                 "ufrag":        ufrag,
                 "pwd":          pwd,
                 "fingerprints": [{"hash": fp_hash, "fingerprint": fp_value}],
-                "ssrc":         self._my_ssrc,
+                # FIX: real SSRC from aiortc — not random.
+                # Telegram uses this to match incoming RTP to the right participant.
+                "ssrc":         ssrc,
             }
 
-            logger.info(f"SSRC (local): {self._my_ssrc}")
+            logger.info(f"SSRC (real, from aiortc): {ssrc}")
             logger.info(f"ICE ufrag sent to Telegram: {ufrag}")
             logger.info(f"DTLS fingerprint sent to Telegram: {fp_hash} {fp_value[:20]}...")
 
-            # PHASE 2: JoinGroupCall with real fingerprint
+            # PHASE 2: JoinGroupCall
             try:
                 result = await self.client.invoke(
                     raw.functions.phone.JoinGroupCall(
@@ -114,12 +110,12 @@ class GroupCallManager:
             logger.info(f"✅ Joined VC in chat {self._chat_id}")
             self._joined = True
 
-            # PHASE 3: Complete WebRTC handshake
+            # PHASE 3: Complete WebRTC handshake (ICE + DTLS run async in background)
             ok = await self.webrtc.complete_connect(
                 group_call_params=self._transport_params,
             )
             if ok:
-                logger.info("✅ Audio connected!")
+                logger.info("✅ Audio connected — waiting for DTLS to complete...")
             return ok
 
         except Exception as e:
@@ -225,27 +221,23 @@ class GroupCallManager:
 
     def _parse_join_response(self, result) -> dict:
         """
-        FIX: Telegram returns UpdateGroupCallConnection which has `params`
-        directly on the update object — NOT nested under `update.call.params`.
-        Old code only checked `.call.params` and always got nothing → 0 candidates.
+        Telegram returns UpdateGroupCallConnection which has `params` as a
+        direct field — not nested under `update.call.params`.
         """
         try:
             for update in result.updates:
                 update_type = type(update).__name__
 
-                # Primary: UpdateGroupCallConnection — params is a direct field
                 if hasattr(update, "params") and hasattr(update.params, "data"):
                     logger.info(f"Transport params found in {update_type}.params")
                     return json.loads(update.params.data)
 
-                # Fallback: older API shape where it lived under .call.params
                 if hasattr(update, "call") and hasattr(update.call, "params"):
                     logger.info(f"Transport params found in {update_type}.call.params")
                     return json.loads(update.call.params.data)
 
-            # Nothing found — log all update types so we can debug further
             types = [type(u).__name__ for u in result.updates]
-            logger.warning(f"Transport params NOT found. Update types received: {types}")
+            logger.warning(f"Transport params NOT found. Update types: {types}")
 
         except Exception as e:
             logger.warning(f"_parse_join_response error: {e}")
