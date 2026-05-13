@@ -5,6 +5,7 @@ core/group_call.py
 import asyncio
 import json
 import logging
+import random                          # ✅ add karo
 from typing import Optional
 
 from pyrogram import Client
@@ -15,14 +16,18 @@ logger = logging.getLogger(__name__)
 
 class GroupCallManager:
     def __init__(self, client: Client, webrtc_engine):
-        self.client             = client
-        self.webrtc             = webrtc_engine
-        self._call_ref          = None
-        self._chat_id           = None
-        self._joined            = False
-        self._transport_params  = {}   # ✅ Real params store karo
+        self.client            = client
+        self.webrtc            = webrtc_engine
+        self._call_ref         = None
+        self._chat_id          = None
+        self._joined           = False
+        self._transport_params = {}
 
     async def join(self, chat_id: int) -> bool:
+        # ✅ FIX 1: Pehle se joined hai toh leave karo
+        if self._joined:
+            await self.leave()
+
         self._chat_id = chat_id
 
         call = await self._get_active_call(chat_id)
@@ -35,9 +40,14 @@ class GroupCallManager:
             access_hash=call.access_hash,
         )
 
+        # ✅ FIX 2: Har baar unique random SSRC generate karo
+        my_ssrc = random.randint(1_000_000, 0x7FFFFFFF)
+
         join_params = {
-            "ufrag": "telegram", "pwd": "telegram",
-            "fingerprints": [], "ssrc": 0,
+            "ufrag":        "telegram",
+            "pwd":          "telegram",
+            "fingerprints": [],
+            "ssrc":         my_ssrc,      # ✅ 0 nahi, unique SSRC
         }
 
         result = await self.client.invoke(
@@ -50,7 +60,6 @@ class GroupCallManager:
             )
         )
 
-        # ✅ FIX: Parse karo AUR store karo
         transport_params       = self._parse_join_response(result)
         self._transport_params = transport_params
 
@@ -62,6 +71,7 @@ class GroupCallManager:
         logger.info(f"✅ Joined VC in chat {chat_id}")
         return True
 
+    # ... baaki sab same
     async def connect_audio(self, pipeline) -> bool:
         if not self._joined:
             logger.error("Pehle join() karo!")
