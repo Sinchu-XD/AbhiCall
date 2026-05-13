@@ -392,7 +392,7 @@ class WebRTCEngine:
                     )
 
                 answer.append(
-                    "a=setup:active"
+                    "a=setup:passive"
                 )
 
                 for line in section[1:]:
@@ -416,6 +416,10 @@ class WebRTCEngine:
 
                 answer.append(
                     "a=rtcp-mux"
+                )
+
+                answer.append(
+                    "a=rtcp-mux-only"
                 )
 
                 answer.append(
