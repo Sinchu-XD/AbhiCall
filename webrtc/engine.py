@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from fractions import Fraction
-from typing import Callable
+from typing import Callable, Optional
 
 from aiortc import (
     RTCPeerConnection,
@@ -21,10 +21,12 @@ BYTES_PER_FRAME = FRAME_SAMPLES * 2 * 2
 
 
 class SwitchableAudioTrack(MediaStreamTrack):
+
     kind = "audio"
 
     def __init__(self):
         super().__init__()
+
         self._pipeline = None
         self._timestamp = 0
 
@@ -33,22 +35,18 @@ class SwitchableAudioTrack(MediaStreamTrack):
 
     def switch_pipeline(self, new_pipeline):
         self._pipeline = new_pipeline
-        logger.info("Audio pipeline switched.")
+        logger.info("Audio track pipeline switched.")
 
-    async def recv(self):
+    async def recv(self) -> AudioFrame:
 
-        loop = asyncio.get_running_loop()
+        logger.warning("recv() called")
 
         if self._pipeline and self._pipeline.is_alive:
-            pcm_bytes = await loop.run_in_executor(
-                None,
-                lambda: self._pipeline.get_frame(timeout=0.05)
-            )
+            pcm_bytes = self._pipeline.get_frame(timeout=0.02)
         else:
             pcm_bytes = None
 
         if pcm_bytes is None:
-            await asyncio.sleep(0.02)
             pcm_bytes = b"\x00" * BYTES_PER_FRAME
 
         frame = AudioFrame(
@@ -57,62 +55,56 @@ class SwitchableAudioTrack(MediaStreamTrack):
             samples=FRAME_SAMPLES
         )
 
-        frame.sample_rate = SAMPLE_RATE
-        frame.pts = self._timestamp
-        frame.time_base = Fraction(1, SAMPLE_RATE)
-
         frame.planes[0].update(pcm_bytes)
 
+        frame.sample_rate = SAMPLE_RATE
+        frame.time_base = Fraction(1, SAMPLE_RATE)
+        frame.pts = self._timestamp
+
         self._timestamp += FRAME_SAMPLES
+
+        logger.info(
+            f"Sending audio frame: {len(pcm_bytes)}"
+        )
 
         return frame
 
 
 class WebRTCEngine:
 
-    def __init__(self, stun_url="stun:stun.l.google.com:19302"):
+    def __init__(
+        self,
+        stun_url: str = "stun:stun.l.google.com:19302"
+    ):
 
         self.stun_url = stun_url
 
         self._pc = None
-        self._track = None
+
+        self._track: Optional[
+            SwitchableAudioTrack
+        ] = None
 
         self._connected = False
-        self._dtls_fired = False
+        self._local_ssrc = 0
 
-        self._on_failed = None
-        self._on_connected = None
+        self._on_failed: Optional[
+            Callable
+        ] = None
 
-        self._prepared_offer_sdp = None
-        self._prepared_ssrc = 0
-        self._prepared_fp = None
-
-    def set_reconnect_callback(self, callback: Callable):
+    def set_reconnect_callback(
+        self,
+        callback: Callable
+    ):
         self._on_failed = callback
 
-    def set_connected_callback(self, callback: Callable):
-        self._on_connected = callback
-
-    async def _fire_connected(self):
-
-        if self._dtls_fired:
-            return
-
-        self._dtls_fired = True
-
-        logger.info("✅ DTLS connected — SRTP active!")
-
-        if self._on_connected:
-            asyncio.create_task(
-                self._on_connected()
-            )
-
-    async def prepare(self, pipeline):
+    async def prepare_offer(
+        self,
+        ssrc: int
+    ) -> tuple:
 
         if self._pc:
             await self._cleanup_pc()
-
-        self._dtls_fired = False
 
         config = RTCConfiguration(
             iceServers=[
@@ -126,62 +118,97 @@ class WebRTCEngine:
             configuration=config
         )
 
+        self._local_ssrc = ssrc
+
+        self._setup_callbacks()
+
         self._track = SwitchableAudioTrack()
-        self._track.set_pipeline(pipeline)
 
-        self._pc.addTrack(self._track)
+        sender = self._pc.addTrack(
+            self._track
+        )
 
-        for transceiver in self._pc.getTransceivers():
-            if transceiver.kind == "audio":
-                transceiver.direction = "sendonly"
+        transceiver = next(
+            t for t in self._pc.getTransceivers()
+            if t.sender == sender
+        )
 
-        self._setup_callbacks(self._pc)
+        transceiver.direction = "sendonly"
+
+        logger.warning(
+            f"Transceivers: {self._pc.getTransceivers()}"
+        )
+
+        for t in self._pc.getTransceivers():
+
+            logger.warning(
+                f"Transceiver currentDirection="
+                f"{t.currentDirection} "
+                f"direction={t.direction}"
+            )
 
         offer = await self._pc.createOffer()
 
-        await self._pc.setLocalDescription(
-            RTCSessionDescription(
-                sdp=offer.sdp,
-                type="offer"
-            )
+        logger.warning(
+            f"LOCAL SDP:\n{offer.sdp}"
         )
 
-        while self._pc.iceGatheringState != "complete":
+        await self._pc.setLocalDescription(
+            offer
+        )
+
+        while (
+            self._pc.iceGatheringState
+            != "complete"
+        ):
             await asyncio.sleep(0.1)
 
-        local_sdp = self._pc.localDescription.sdp
+        offer_sdp = (
+            self._pc.localDescription.sdp
+        )
 
-        ufrag, pwd = self._extract_ice_credentials(local_sdp)
-        fingerprint = self._extract_fingerprint(local_sdp)
-        ssrc = self._extract_ssrc(local_sdp)
-
-        self._prepared_offer_sdp = local_sdp
-        self._prepared_ssrc = ssrc
-        self._prepared_fp = fingerprint
+        ufrag, pwd = self._extract_ice_credentials(
+            offer_sdp
+        )
 
         logger.info(
-            f"WebRTC prepared — "
+            f"Offer ICE creds — "
             f"ufrag: {ufrag} "
-            f"ssrc: {ssrc} "
-            f"fingerprint: {fingerprint[:40]}..."
+            f"pwd: {pwd[:8]}..."
         )
 
-        return ufrag, pwd, fingerprint, ssrc
+        return offer_sdp, ufrag, pwd
 
-    async def complete_connect(self, group_call_params: dict):
+    async def finalize_connection(
+        self,
+        transport_params: dict,
+        pipeline
+    ) -> bool:
 
-        if not self._pc:
-            logger.error("prepare() not called")
+        if not self._pc or not self._track:
+
+            logger.error(
+                "prepare_offer() must be called first"
+            )
+
             return False
 
-        remote_sdp = self._build_remote_sdp(
-            self._prepared_offer_sdp,
-            group_call_params
+        self._track.set_pipeline(
+            pipeline
         )
 
-        logger.info("REMOTE SDP START")
-        logger.info(remote_sdp)
-        logger.info("REMOTE SDP END")
+        offer_sdp = (
+            self._pc.localDescription.sdp
+        )
+
+        remote_sdp = self._build_remote_sdp(
+            offer_sdp,
+            transport_params
+        )
+
+        logger.warning(
+            f"REMOTE SDP:\n{remote_sdp}"
+        )
 
         await self._pc.setRemoteDescription(
             RTCSessionDescription(
@@ -190,153 +217,179 @@ class WebRTCEngine:
             )
         )
 
-        for transceiver in self._pc.getTransceivers():
+        await asyncio.sleep(2)
 
-            sender = transceiver.sender
-
-            if sender and sender.transport:
-                logger.info(
-                    "Forcing sender transport startup..."
-                )
-
-        await asyncio.sleep(1)
+        logger.warning(
+            f"Connection state after SDP: "
+            f"{self._pc.connectionState}"
+        )
 
         self._connected = True
 
         logger.info(
-            "✅ WebRTC handshake started — "
-            "ICE/DTLS running..."
-        )
-
-        asyncio.create_task(
-            self._poll_connection_state(self._pc)
+            "✅ WebRTC connected to Telegram Group Call!"
         )
 
         return True
 
-    async def _poll_connection_state(self, pc):
+    async def disconnect(self):
 
-        last_state = None
+        self._connected = False
 
-        for i in range(60):
+        await self._cleanup_pc()
 
-            await asyncio.sleep(1)
-
-            try:
-                state = pc.connectionState
-            except Exception:
-                return
-
-            if state != last_state:
-
-                logger.info(
-                    f"[poll {i+1}s] connectionState: {state}"
-                )
-
-                last_state = state
-
-            if state == "connected":
-                await self._fire_connected()
-                return
-
-            if state in ("failed", "closed"):
-
-                self._connected = False
-
-                logger.warning(
-                    f"WebRTC {state}"
-                )
-
-                if self._on_failed:
-                    asyncio.create_task(
-                        self._on_failed()
-                    )
-
-                return
-
-        logger.error(
-            f"DTLS timed out after 60s "
-            f"(last state: {last_state})"
+        logger.info(
+            "WebRTC disconnected."
         )
 
-    def _setup_callbacks(self, pc):
+    def switch_track(
+        self,
+        new_pipeline
+    ):
 
-        @pc.on("connectionstatechange")
-        async def on_connection():
-
-            try:
-                state = pc.connectionState
-            except Exception:
-                return
-
-            logger.info(
-                f"WebRTC state (event): {state}"
+        if self._track:
+            self._track.switch_pipeline(
+                new_pipeline
             )
 
-            if state == "connected":
-                await self._fire_connected()
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
 
-            if state in ("failed", "closed"):
+    async def _cleanup_pc(self):
+
+        if self._track:
+            self._track.stop()
+            self._track = None
+
+        if self._pc:
+            await self._pc.close()
+            self._pc = None
+
+    def _extract_ice_credentials(
+        self,
+        sdp: str
+    ) -> tuple:
+
+        ufrag = "telegram"
+        pwd = "telegram"
+
+        for line in sdp.split("\r\n"):
+
+            if line.startswith(
+                "a=ice-ufrag:"
+            ):
+                ufrag = line.replace(
+                    "a=ice-ufrag:",
+                    ""
+                )
+
+            elif line.startswith(
+                "a=ice-pwd:"
+            ):
+                pwd = line.replace(
+                    "a=ice-pwd:",
+                    ""
+                )
+
+        return ufrag, pwd
+
+    def _setup_callbacks(self):
+
+        @self._pc.on(
+            "connectionstatechange"
+        )
+        async def on_state():
+
+            state = (
+                self._pc.connectionState
+            )
+
+            logger.info(
+                f"WebRTC state: {state}"
+            )
+
+            if state in (
+                "failed",
+                "closed"
+            ):
 
                 self._connected = False
 
                 if self._on_failed:
+
+                    logger.warning(
+                        "WebRTC failed — "
+                        "reconnect callback..."
+                    )
+
                     asyncio.create_task(
                         self._on_failed()
                     )
 
-        @pc.on("iceconnectionstatechange")
+        @self._pc.on(
+            "iceconnectionstatechange"
+        )
         async def on_ice():
 
-            try:
-                logger.info(
-                    f"ICE state: {pc.iceConnectionState}"
-                )
-            except Exception:
-                pass
+            logger.info(
+                f"ICE state: "
+                f"{self._pc.iceConnectionState}"
+            )
 
-    def _build_remote_sdp(self, offer_sdp, params):
+    def _build_remote_sdp(
+        self,
+        offer_sdp: str,
+        params: dict
+    ) -> str:
 
-        transport = params.get("transport", {})
+        transport = params.get(
+            "transport",
+            {}
+        )
 
-        fp_list = transport.get("fingerprints", [])
+        fingerprints = transport.get(
+            "fingerprints",
+            []
+        )
 
-        if fp_list:
+        if fingerprints:
 
-            fp_hash = fp_list[0].get(
+            fp_hash = fingerprints[0].get(
                 "hash",
                 "sha-256"
             )
 
-            fp_value = fp_list[0].get(
+            fp_value = fingerprints[0].get(
                 "fingerprint",
                 ""
-            ).upper()
+            )
 
         else:
 
             fp_hash = "sha-256"
             fp_value = ""
 
-        ufrag = transport.get("ufrag", "telegram")
-        pwd = transport.get("pwd", "telegram")
+        ufrag = transport.get(
+            "ufrag",
+            "telegram"
+        )
+
+        pwd = transport.get(
+            "pwd",
+            "telegram"
+        )
+
+        ssrc = self._local_ssrc
 
         candidates = transport.get(
             "candidates",
             []
         )
 
-        answer = [
-            "v=0",
-            "o=- 0 0 IN IP4 127.0.0.1",
-            "s=-",
-            "t=0 0",
-            "a=group:BUNDLE 0",
-            "a=msid-semantic:WMS *",
-        ]
-
         sections = []
         current = []
+
         session_done = False
 
         for line in offer_sdp.split("\r\n"):
@@ -347,7 +400,10 @@ class WebRTCEngine:
             if line.startswith("m="):
 
                 if session_done:
-                    sections.append(current)
+                    sections.append(
+                        current
+                    )
+
                 else:
                     session_done = True
 
@@ -359,19 +415,20 @@ class WebRTCEngine:
         if current:
             sections.append(current)
 
+        answer = [
+            "v=0",
+            "o=- 0 0 IN IP4 127.0.0.1",
+            "s=-",
+            "t=0 0",
+        ]
+
         for section in sections:
 
             m_line = section[0]
 
             if "audio" in m_line:
 
-                parts = m_line.split()
-
-                parts[1] = "9"
-
-                answer.append(
-                    " ".join(parts)
-                )
+                answer.append(m_line)
 
                 answer.append(
                     "c=IN IP4 0.0.0.0"
@@ -388,7 +445,9 @@ class WebRTCEngine:
                 if fp_value:
 
                     answer.append(
-                        f"a=fingerprint:{fp_hash} {fp_value}"
+                        f"a=fingerprint:"
+                        f"{fp_hash} "
+                        f"{fp_value}"
                     )
 
                 answer.append(
@@ -398,14 +457,16 @@ class WebRTCEngine:
                 for line in section[1:]:
 
                     if any(
-                        line.startswith(prefix)
-                        for prefix in (
+                        line.startswith(p)
+                        for p in (
                             "a=rtpmap",
                             "a=fmtp",
                             "a=rtcp-fb",
                             "a=mid",
                             "a=extmap",
+                            "a=msid",
                             "a=ice-options",
+                            "a=ssrc-group",
                         )
                     ):
                         answer.append(line)
@@ -419,38 +480,39 @@ class WebRTCEngine:
                 )
 
                 answer.append(
-                    "a=rtcp-mux-only"
-                )
-
-                answer.append(
                     "a=rtcp-rsize"
                 )
 
                 answer.append(
-                    "a=recvonly"
+                    "a=sendrecv"
                 )
+
+                if ssrc:
+
+                    answer.append(
+                        f"a=ssrc:{ssrc} "
+                        f"cname:telegram"
+                    )
 
                 for c in candidates:
 
                     answer.append(
-                        f"a=candidate:{c.get('foundation', '1')} 1 "
+                        f"a=candidate:"
+                        f"{c.get('foundation', '1')} "
+                        f"1 "
                         f"{c.get('protocol', 'udp')} "
                         f"{c.get('priority', 2130706431)} "
                         f"{c.get('ip', '0.0.0.0')} "
                         f"{c.get('port', 0)} "
-                        f"typ {c.get('type', 'host')}"
+                        f"typ "
+                        f"{c.get('type', 'host')}"
                     )
-
-                answer.append(
-                    "a=end-of-candidates"
-                )
 
             else:
 
                 parts = m_line.split()
 
-                if len(parts) >= 2:
-                    parts[1] = "0"
+                parts[1] = "0"
 
                 answer.append(
                     " ".join(parts)
@@ -462,77 +524,12 @@ class WebRTCEngine:
 
                 for line in section[1:]:
 
-                    if line.startswith("a=mid"):
+                    if line.startswith(
+                        "a=mid"
+                    ):
                         answer.append(line)
 
-        return "\r\n".join(answer) + "\r\n"
-
-    def _extract_ice_credentials(self, sdp):
-
-        ufrag = ""
-        pwd = ""
-
-        for line in sdp.split("\r\n"):
-
-            if line.startswith("a=ice-ufrag:"):
-                ufrag = line.split(":", 1)[1]
-
-            elif line.startswith("a=ice-pwd:"):
-                pwd = line.split(":", 1)[1]
-
-        return ufrag, pwd
-
-    def _extract_fingerprint(self, sdp):
-
-        for line in sdp.split("\r\n"):
-
-            if line.startswith("a=fingerprint:"):
-                return line.split(":", 1)[1]
-
-        return ""
-
-    def _extract_ssrc(self, sdp):
-
-        for line in sdp.split("\r\n"):
-
-            if line.startswith("a=ssrc:"):
-
-                try:
-                    return int(
-                        line.split(":")[1].split()[0]
-                    )
-                except:
-                    pass
-
-        return 0
-
-    async def _cleanup_pc(self):
-
-        if self._track:
-            self._track.stop()
-            self._track = None
-
-        if self._pc:
-            await self._pc.close()
-            self._pc = None
-
-    async def disconnect(self):
-
-        self._connected = False
-        self._dtls_fired = False
-
-        self._prepared_offer_sdp = None
-        self._prepared_ssrc = 0
-        self._prepared_fp = None
-
-        await self._cleanup_pc()
-
-        logger.info("WebRTC disconnected.")
-
-    @property
-    def is_connected(self):
-        return self._connected
-
-    @property
-    def prepared_ssrc(self):
-        return self._prepared_ssrc
+        return (
+            "\r\n".join(answer)
+            + "\r\n"
+        )
