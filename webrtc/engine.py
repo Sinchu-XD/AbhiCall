@@ -242,7 +242,7 @@ class WebRTCEngine:
                 answer.append(f"a=ice-pwd:{pwd}")
                 if fp_value:
                     answer.append(f"a=fingerprint:{fp_hash} {fp_value}")
-                answer.append("a=setup:active")   # FIX: was "passive"
+                answer.append("a=setup:passive")  # Telegram is DTLS server; bot (aiortc) initiates   # FIX: was "passive"
 
                 for line in section[1:]:
                     if any(line.startswith(p) for p in (
