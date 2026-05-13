@@ -1,14 +1,14 @@
 """
-webrtc/engine.py — Fixed version
+webrtc/engine.py — Fixed v2
 
 FIXES:
-  1. prepare() method — creates PC + offer BEFORE JoinGroupCall so real DTLS
-     fingerprint can be extracted and sent to Telegram. This is the root cause
-     of silence: empty fingerprints = no verified DTLS = no SRTP audio.
-  2. Null-guard in callbacks — captures `pc` as a closure variable so callbacks
-     don't crash with AttributeError when self._pc is set to None during cleanup.
-  3. complete_connect() replaces connect() — uses the already-prepared PC instead
-     of creating a new one, so fingerprint matches what Telegram received.
+  1. prepare() creates PC + offer BEFORE JoinGroupCall — real DTLS fingerprint
+     extracted here and sent to Telegram (was always empty before).
+  2. complete_connect() guards against empty remote fingerprint — if Telegram
+     sends no fingerprint (bad parse), raises a clear error instead of letting
+     aiortc crash with a bare AssertionError deep in its internals.
+  3. Callbacks capture `pc` as closure variable — no more NullPointerError
+     when self._pc is set to None during cleanup.
 """
 
 import asyncio
@@ -80,8 +80,6 @@ class WebRTCEngine:
         self._on_failed: Optional[Callable] = None
 
         self._prepared_offer_sdp: Optional[str] = None
-        self._prepared_ufrag:     Optional[str] = None
-        self._prepared_pwd:       Optional[str] = None
         self._prepared_fp:        Optional[str] = None
 
     def set_reconnect_callback(self, callback: Callable):
@@ -89,15 +87,14 @@ class WebRTCEngine:
 
     async def prepare(self, pipeline) -> tuple[str, str, str]:
         """
-        Call BEFORE JoinGroupCall.
-        Creates PC + offer, gathers ICE, returns (ufrag, pwd, fingerprint)
-        so they can be sent to Telegram in JoinGroupCall.
+        Phase 1 — call BEFORE JoinGroupCall.
+        Returns (ufrag, pwd, fingerprint) to send to Telegram.
         """
         if self._pc:
             await self._cleanup_pc()
 
-        config    = RTCConfiguration(iceServers=[RTCIceServer(urls=[self.stun_url])])
-        self._pc  = RTCPeerConnection(configuration=config)
+        config   = RTCConfiguration(iceServers=[RTCIceServer(urls=[self.stun_url])])
+        self._pc = RTCPeerConnection(configuration=config)
 
         self._track = SwitchableAudioTrack()
         self._track.set_pipeline(pipeline)
@@ -116,8 +113,6 @@ class WebRTCEngine:
         fingerprint = self._extract_fingerprint(local_sdp)
 
         self._prepared_offer_sdp = local_sdp
-        self._prepared_ufrag     = ufrag
-        self._prepared_pwd       = pwd
         self._prepared_fp        = fingerprint
 
         logger.info(f"WebRTC prepared — ufrag: {ufrag}  fingerprint: {fingerprint[:30]}...")
@@ -125,12 +120,32 @@ class WebRTCEngine:
 
     async def complete_connect(self, group_call_params: dict) -> bool:
         """
-        Call AFTER JoinGroupCall succeeds.
-        Registers callbacks and sets remote description to finish the handshake.
+        Phase 2 — call AFTER JoinGroupCall succeeds.
+        Sets remote description to finish the WebRTC handshake.
         """
         if not self._pc or not self._prepared_offer_sdp:
             logger.error("complete_connect() called before prepare()!")
             return False
+
+        transport  = group_call_params.get("transport", {})
+        candidates = transport.get("candidates", [])
+        fp_list    = transport.get("fingerprints", [])
+
+        # FIX: Catch the case where parsing failed and fingerprints are missing.
+        # aiortc crashes with a bare AssertionError without this guard.
+        if not fp_list:
+            logger.error(
+                "Telegram returned no fingerprints in transport params — "
+                "JoinGroupCall response was likely not parsed correctly. "
+                "Check _parse_join_response logs above."
+            )
+            return False
+
+        if not candidates:
+            logger.warning(
+                "Telegram returned 0 ICE candidates — "
+                "ICE will likely fail. Check that the VC is active and reachable."
+            )
 
         self._setup_callbacks(self._pc)
 
@@ -147,8 +162,6 @@ class WebRTCEngine:
     async def disconnect(self):
         self._connected          = False
         self._prepared_offer_sdp = None
-        self._prepared_ufrag     = None
-        self._prepared_pwd       = None
         self._prepared_fp        = None
         await self._cleanup_pc()
         logger.info("WebRTC disconnected.")
@@ -187,8 +200,8 @@ class WebRTCEngine:
 
     def _setup_callbacks(self, pc: RTCPeerConnection):
         """
-        FIX: `pc` captured as closure variable — NOT self._pc.
-        Prevents AttributeError when self._pc becomes None during cleanup.
+        FIX: `pc` is a closure variable, not self._pc.
+        Safe even after self._pc is set to None during cleanup.
         """
         @pc.on("connectionstatechange")
         async def on_state():
