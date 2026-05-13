@@ -233,9 +233,11 @@ YDL_OPTS = {
 
 async def resolve_url(query: str) -> dict | None:
     """
+"""
     Query (YouTube URL ya search term) se audio info nikalo.
     Returns: {"title": str, "url": str, "duration": int} ya None
     """
+"""
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(None, _extract, query)
@@ -270,3 +272,4 @@ def format_duration(seconds: int) -> str:
     m, s = divmod(int(seconds), 60)
     h, m = divmod(m, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+"""
