@@ -98,10 +98,7 @@ class WebRTCEngine:
     ):
         self._on_connected = callback
 
-    async def prepare_offer(
-        self,
-        ssrc: int
-    ) -> tuple:
+    async def prepare(self, pipeline):
 
         if self._pc:
             await self._cleanup_pc()
@@ -118,11 +115,13 @@ class WebRTCEngine:
             configuration=config
         )
 
-        self._local_ssrc = ssrc
-
         self._setup_callbacks()
 
         self._track = SwitchableAudioTrack()
+
+        self._track.set_pipeline(
+            pipeline
+        )
 
         sender = self._pc.addTrack(
             self._track
@@ -155,20 +154,59 @@ class WebRTCEngine:
             offer_sdp
         )
 
-        return offer_sdp, ufrag, pwd
+        fingerprint = ""
 
-    async def finalize_connection(
+        for line in offer_sdp.split("\r\n"):
+
+            if line.startswith("a=fingerprint:"):
+
+                fingerprint = line.replace(
+                    "a=fingerprint:",
+                    ""
+                )
+
+                break
+
+        ssrc = 0
+
+        for line in offer_sdp.split("\r\n"):
+
+            if line.startswith("a=ssrc:"):
+
+                try:
+
+                    ssrc = int(
+                        line.split(":")[1].split()[0]
+                    )
+
+                    break
+
+                except:
+                    pass
+
+        self._local_ssrc = ssrc
+
+        logger.info(
+            f"WebRTC prepared — "
+            f"ufrag: {ufrag} "
+            f"ssrc: {ssrc} "
+            f"fingerprint: {fingerprint[:40]}..."
+        )
+
+        return (
+            ufrag,
+            pwd,
+            fingerprint,
+            ssrc
+        )
+
+    async def complete_connect(
         self,
-        transport_params: dict,
-        pipeline
-    ) -> bool:
+        group_call_params
+    ):
 
         if not self._pc or not self._track:
             return False
-
-        self._track.set_pipeline(
-            pipeline
-        )
 
         offer_sdp = (
             self._pc.localDescription.sdp
@@ -176,7 +214,7 @@ class WebRTCEngine:
 
         remote_sdp = self._build_remote_sdp(
             offer_sdp,
-            transport_params
+            group_call_params
         )
 
         logger.info("REMOTE SDP START")
@@ -278,6 +316,10 @@ class WebRTCEngine:
     @property
     def is_connected(self) -> bool:
         return self._connected
+
+    @property
+    def prepared_ssrc(self):
+        return self._local_ssrc
 
     async def _cleanup_pc(self):
 
@@ -561,4 +603,4 @@ class WebRTCEngine:
         return (
             "\r\n".join(answer)
             + "\r\n"
-                )
+            )
