@@ -276,7 +276,7 @@ class WebRTCEngine:
                 answer.append(f"a=ice-pwd:{pwd}")
                 if fp_value:
                     answer.append(f"a=fingerprint:{fp_hash} {fp_value}")
-                answer.append("a=setup:passive")
+                answer.append("a=setup:active")
 
                 for line in section[1:]:
                     if any(line.startswith(p) for p in (
