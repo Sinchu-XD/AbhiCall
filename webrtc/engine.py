@@ -325,7 +325,7 @@ class WebRTCEngine:
                     answer.append(f"a=fingerprint:{fp_hash} {fp_value}")
                 # a=setup:active → Telegram initiates DTLS (sends ClientHello).
                 # aiortc (ICE-controlling) becomes DTLS passive (server), waits.
-                answer.append("a=setup:active")
+                answer.append("a=setup:passive")
 
                 for line in section[1:]:
                     if any(line.startswith(p) for p in (
