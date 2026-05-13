@@ -103,7 +103,10 @@ class WebRTCEngine:
         self._setup_callbacks()
 
         self._track = SwitchableAudioTrack()
-        self._pc.addTrack(self._track)
+        self._pc.addTransceiver(
+            self._track,
+            direction="sendonly"
+        )
         logger.warning(f"Transceivers: {self._pc.getTransceivers()}")
 
         offer = await self._pc.createOffer()
