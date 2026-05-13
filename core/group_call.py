@@ -1,14 +1,12 @@
 """
-core/group_call.py — Fixed version
+core/group_call.py — Fixed v2
 
 FIXES:
-  1. connect_audio() calls webrtc.prepare() FIRST to get the real DTLS fingerprint,
-     then includes it in JoinGroupCall params. Root cause of silence was always
-     sending fingerprints=[] so Telegram couldn't verify DTLS → no SRTP audio.
-  2. connect_audio() calls webrtc.complete_connect() using the already-prepared PC
-     so fingerprint and ICE credentials match exactly what Telegram received.
-  3. _reconnecting flag now always resets via finally block.
-  4. Max reconnect attempts (5) with exponential backoff to stop infinite loops.
+  1. _parse_join_response now checks UpdateGroupCallConnection.params directly
+     (not update.call.params) — this is why ICE candidates were always 0.
+  2. connect_audio() calls webrtc.prepare() for real DTLS fingerprint.
+  3. _reconnecting flag always resets in finally block.
+  4. Max 5 reconnect attempts with backoff.
 """
 
 import asyncio
@@ -43,6 +41,10 @@ class GroupCallManager:
 
         self.webrtc.set_reconnect_callback(self._on_webrtc_failed)
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     async def join(self, chat_id: int) -> bool:
         if self._joined:
             await self.leave()
@@ -68,6 +70,7 @@ class GroupCallManager:
         try:
             self._pipeline = pipeline
 
+            # PHASE 1: Create WebRTC PC, gather ICE, extract real fingerprint
             ufrag, pwd, fingerprint = await self.webrtc.prepare(pipeline)
 
             fp_parts = fingerprint.split(" ", 1)
@@ -79,19 +82,15 @@ class GroupCallManager:
             join_params = {
                 "ufrag":        ufrag,
                 "pwd":          pwd,
-                "fingerprints": [
-                    {
-                        "hash":        fp_hash,
-                        "fingerprint": fp_value,
-                    }
-                ],
-                "ssrc": self._my_ssrc,
+                "fingerprints": [{"hash": fp_hash, "fingerprint": fp_value}],
+                "ssrc":         self._my_ssrc,
             }
 
             logger.info(f"SSRC (local): {self._my_ssrc}")
             logger.info(f"ICE ufrag sent to Telegram: {ufrag}")
             logger.info(f"DTLS fingerprint sent to Telegram: {fp_hash} {fp_value[:20]}...")
 
+            # PHASE 2: JoinGroupCall with real fingerprint
             try:
                 result = await self.client.invoke(
                     raw.functions.phone.JoinGroupCall(
@@ -107,6 +106,7 @@ class GroupCallManager:
                 return False
 
             self._transport_params = self._parse_join_response(result)
+
             candidates_count = len(
                 self._transport_params.get("transport", {}).get("candidates", [])
             )
@@ -114,6 +114,7 @@ class GroupCallManager:
             logger.info(f"✅ Joined VC in chat {self._chat_id}")
             self._joined = True
 
+            # PHASE 3: Complete WebRTC handshake
             ok = await self.webrtc.complete_connect(
                 group_call_params=self._transport_params,
             )
@@ -160,6 +161,10 @@ class GroupCallManager:
     def is_joined(self) -> bool:
         return self._joined
 
+    # ------------------------------------------------------------------
+    # Auto-reconnect
+    # ------------------------------------------------------------------
+
     async def _on_webrtc_failed(self):
         if self._reconnecting or not self._chat_id:
             return
@@ -202,6 +207,10 @@ class GroupCallManager:
         finally:
             self._reconnecting = False
 
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
     async def _get_active_call(self, chat_id: int):
         try:
             full = await self.client.invoke(
@@ -215,12 +224,30 @@ class GroupCallManager:
             return None
 
     def _parse_join_response(self, result) -> dict:
+        """
+        FIX: Telegram returns UpdateGroupCallConnection which has `params`
+        directly on the update object — NOT nested under `update.call.params`.
+        Old code only checked `.call.params` and always got nothing → 0 candidates.
+        """
         try:
             for update in result.updates:
-                if hasattr(update, "call"):
-                    call = update.call
-                    if hasattr(call, "params"):
-                        return json.loads(call.params.data)
+                update_type = type(update).__name__
+
+                # Primary: UpdateGroupCallConnection — params is a direct field
+                if hasattr(update, "params") and hasattr(update.params, "data"):
+                    logger.info(f"Transport params found in {update_type}.params")
+                    return json.loads(update.params.data)
+
+                # Fallback: older API shape where it lived under .call.params
+                if hasattr(update, "call") and hasattr(update.call, "params"):
+                    logger.info(f"Transport params found in {update_type}.call.params")
+                    return json.loads(update.call.params.data)
+
+            # Nothing found — log all update types so we can debug further
+            types = [type(u).__name__ for u in result.updates]
+            logger.warning(f"Transport params NOT found. Update types received: {types}")
+
         except Exception as e:
-            logger.warning(f"Could not parse join response: {e}")
+            logger.warning(f"_parse_join_response error: {e}")
+
         return {}
