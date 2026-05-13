@@ -35,14 +35,16 @@ class SwitchableAudioTrack(MediaStreamTrack):
 
     def switch_pipeline(self, new_pipeline):
         self._pipeline = new_pipeline
-        logger.info("Audio track pipeline switched.")
 
     async def recv(self) -> AudioFrame:
 
-        logger.warning("recv() called")
+        loop = asyncio.get_running_loop()
 
         if self._pipeline and self._pipeline.is_alive:
-            pcm_bytes = self._pipeline.get_frame(timeout=0.02)
+            pcm_bytes = await loop.run_in_executor(
+                None,
+                lambda: self._pipeline.get_frame(timeout=0.02)
+            )
         else:
             pcm_bytes = None
 
@@ -63,10 +65,6 @@ class SwitchableAudioTrack(MediaStreamTrack):
 
         self._timestamp += FRAME_SAMPLES
 
-        logger.info(
-            f"Sending audio frame: {len(pcm_bytes)}"
-        )
-
         return frame
 
 
@@ -80,23 +78,25 @@ class WebRTCEngine:
         self.stun_url = stun_url
 
         self._pc = None
-
-        self._track: Optional[
-            SwitchableAudioTrack
-        ] = None
+        self._track = None
 
         self._connected = False
         self._local_ssrc = 0
 
-        self._on_failed: Optional[
-            Callable
-        ] = None
+        self._on_failed = None
+        self._on_connected = None
 
     def set_reconnect_callback(
         self,
         callback: Callable
     ):
         self._on_failed = callback
+
+    def set_connected_callback(
+        self,
+        callback: Callable
+    ):
+        self._on_connected = callback
 
     async def prepare_offer(
         self,
@@ -135,23 +135,7 @@ class WebRTCEngine:
 
         transceiver.direction = "sendonly"
 
-        logger.warning(
-            f"Transceivers: {self._pc.getTransceivers()}"
-        )
-
-        for t in self._pc.getTransceivers():
-
-            logger.warning(
-                f"Transceiver currentDirection="
-                f"{t.currentDirection} "
-                f"direction={t.direction}"
-            )
-
         offer = await self._pc.createOffer()
-
-        logger.warning(
-            f"LOCAL SDP:\n{offer.sdp}"
-        )
 
         await self._pc.setLocalDescription(
             offer
@@ -171,12 +155,6 @@ class WebRTCEngine:
             offer_sdp
         )
 
-        logger.info(
-            f"Offer ICE creds — "
-            f"ufrag: {ufrag} "
-            f"pwd: {pwd[:8]}..."
-        )
-
         return offer_sdp, ufrag, pwd
 
     async def finalize_connection(
@@ -186,11 +164,6 @@ class WebRTCEngine:
     ) -> bool:
 
         if not self._pc or not self._track:
-
-            logger.error(
-                "prepare_offer() must be called first"
-            )
-
             return False
 
         self._track.set_pipeline(
@@ -206,9 +179,9 @@ class WebRTCEngine:
             transport_params
         )
 
-        logger.warning(
-            f"REMOTE SDP:\n{remote_sdp}"
-        )
+        logger.info("REMOTE SDP START")
+        logger.info(remote_sdp)
+        logger.info("REMOTE SDP END")
 
         await self._pc.setRemoteDescription(
             RTCSessionDescription(
@@ -217,30 +190,80 @@ class WebRTCEngine:
             )
         )
 
-        await asyncio.sleep(2)
-
-        logger.warning(
-            f"Connection state after SDP: "
-            f"{self._pc.connectionState}"
+        logger.info(
+            "Waiting for DTLS..."
         )
 
-        self._connected = True
-
-        logger.info(
-            "✅ WebRTC connected to Telegram Group Call!"
+        asyncio.create_task(
+            self._poll_connection()
         )
 
         return True
+
+    async def _poll_connection(self):
+
+        last = None
+
+        for i in range(60):
+
+            await asyncio.sleep(1)
+
+            if not self._pc:
+                return
+
+            state = self._pc.connectionState
+
+            if state != last:
+
+                logger.info(
+                    f"[poll {i+1}s] "
+                    f"connectionState={state}"
+                )
+
+                last = state
+
+            if state == "connected":
+
+                self._connected = True
+
+                logger.info(
+                    "✅ DTLS connected!"
+                )
+
+                if self._on_connected:
+                    asyncio.create_task(
+                        self._on_connected()
+                    )
+
+                return
+
+            if state in (
+                "failed",
+                "closed"
+            ):
+
+                self._connected = False
+
+                logger.error(
+                    f"WebRTC {state}"
+                )
+
+                if self._on_failed:
+                    asyncio.create_task(
+                        self._on_failed()
+                    )
+
+                return
+
+        logger.error(
+            "DTLS timeout"
+        )
 
     async def disconnect(self):
 
         self._connected = False
 
         await self._cleanup_pc()
-
-        logger.info(
-            "WebRTC disconnected."
-        )
 
     def switch_track(
         self,
@@ -271,8 +294,8 @@ class WebRTCEngine:
         sdp: str
     ) -> tuple:
 
-        ufrag = "telegram"
-        pwd = "telegram"
+        ufrag = ""
+        pwd = ""
 
         for line in sdp.split("\r\n"):
 
@@ -309,7 +332,20 @@ class WebRTCEngine:
                 f"WebRTC state: {state}"
             )
 
-            if state in (
+            if state == "connected":
+
+                self._connected = True
+
+                logger.info(
+                    "✅ DTLS connected!"
+                )
+
+                if self._on_connected:
+                    asyncio.create_task(
+                        self._on_connected()
+                    )
+
+            elif state in (
                 "failed",
                 "closed"
             ):
@@ -317,11 +353,6 @@ class WebRTCEngine:
                 self._connected = False
 
                 if self._on_failed:
-
-                    logger.warning(
-                        "WebRTC failed — "
-                        "reconnect callback..."
-                    )
 
                     asyncio.create_task(
                         self._on_failed()
@@ -363,7 +394,7 @@ class WebRTCEngine:
             fp_value = fingerprints[0].get(
                 "fingerprint",
                 ""
-            )
+            ).upper()
 
         else:
 
@@ -379,8 +410,6 @@ class WebRTCEngine:
             "pwd",
             "telegram"
         )
-
-        ssrc = self._local_ssrc
 
         candidates = transport.get(
             "candidates",
@@ -420,6 +449,8 @@ class WebRTCEngine:
             "o=- 0 0 IN IP4 127.0.0.1",
             "s=-",
             "t=0 0",
+            "a=group:BUNDLE 0",
+            "a=msid-semantic:WMS *",
         ]
 
         for section in sections:
@@ -465,7 +496,7 @@ class WebRTCEngine:
                             "a=mid",
                             "a=extmap",
                             "a=msid",
-                            "a=ice-options",
+                            "a=ssrc",
                             "a=ssrc-group",
                         )
                     ):
@@ -487,13 +518,6 @@ class WebRTCEngine:
                     "a=sendrecv"
                 )
 
-                if ssrc:
-
-                    answer.append(
-                        f"a=ssrc:{ssrc} "
-                        f"cname:telegram"
-                    )
-
                 for c in candidates:
 
                     answer.append(
@@ -508,11 +532,16 @@ class WebRTCEngine:
                         f"{c.get('type', 'host')}"
                     )
 
+                answer.append(
+                    "a=end-of-candidates"
+                )
+
             else:
 
                 parts = m_line.split()
 
-                parts[1] = "0"
+                if len(parts) >= 2:
+                    parts[1] = "0"
 
                 answer.append(
                     " ".join(parts)
@@ -532,4 +561,4 @@ class WebRTCEngine:
         return (
             "\r\n".join(answer)
             + "\r\n"
-        )
+                )
