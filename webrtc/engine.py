@@ -386,7 +386,12 @@ class WebRTCEngine:
                 # RFC 5763 §5: when answer contains passive, offerer MUST be active.
                 # Previous "active" here meant "remote is active" → aiortc waited
                 # for a ClientHello that Telegram would never send → DTLS deadlock.
-                answer.append("a=setup:passive")
+                # New — parse Telegram's actual setup role and respond correctly
+                telegram_setup = transport.get("setup", "active")
+                local_setup = "active" if telegram_setup in ("passive", "holdconn") else "passive"
+                answer.append(f"a=setup:{local_setup}")
+              
+            
 
                 for line in section[1:]:
                     if any(line.startswith(p) for p in (
