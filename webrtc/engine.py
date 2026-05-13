@@ -139,6 +139,14 @@ class WebRTCEngine:
             f"Transceivers: {self._pc.getTransceivers()}"
         )
 
+        for t in self._pc.getTransceivers():
+
+            logger.warning(
+                f"Transceiver currentDirection="
+                f"{t.currentDirection} "
+                f"direction={t.direction}"
+            )
+
         offer = await self._pc.createOffer()
 
         logger.warning(
@@ -164,7 +172,9 @@ class WebRTCEngine:
         )
 
         logger.info(
-            f"Offer ICE creds — ufrag: {ufrag} pwd: {pwd[:8]}..."
+            f"Offer ICE creds — "
+            f"ufrag: {ufrag} "
+            f"pwd: {pwd[:8]}..."
         )
 
         return offer_sdp, ufrag, pwd
@@ -205,6 +215,13 @@ class WebRTCEngine:
                 sdp=remote_sdp,
                 type="answer"
             )
+        )
+
+        await asyncio.sleep(2)
+
+        logger.warning(
+            f"Connection state after SDP: "
+            f"{self._pc.connectionState}"
         )
 
         self._connected = True
@@ -302,7 +319,8 @@ class WebRTCEngine:
                 if self._on_failed:
 
                     logger.warning(
-                        "WebRTC failed — reconnect callback..."
+                        "WebRTC failed — "
+                        "reconnect callback..."
                     )
 
                     asyncio.create_task(
@@ -315,7 +333,8 @@ class WebRTCEngine:
         async def on_ice():
 
             logger.info(
-                f"ICE state: {self._pc.iceConnectionState}"
+                f"ICE state: "
+                f"{self._pc.iceConnectionState}"
             )
 
     def _build_remote_sdp(
@@ -426,11 +445,13 @@ class WebRTCEngine:
                 if fp_value:
 
                     answer.append(
-                        f"a=fingerprint:{fp_hash} {fp_value}"
+                        f"a=fingerprint:"
+                        f"{fp_hash} "
+                        f"{fp_value}"
                     )
 
                 answer.append(
-                    "a=setup:active"
+                    "a=setup:passive"
                 )
 
                 for line in section[1:]:
@@ -469,18 +490,22 @@ class WebRTCEngine:
                 if ssrc:
 
                     answer.append(
-                        f"a=ssrc:{ssrc} cname:telegram"
+                        f"a=ssrc:{ssrc} "
+                        f"cname:telegram"
                     )
 
                 for c in candidates:
 
                     answer.append(
-                        f"a=candidate:{c.get('foundation', '1')} 1 "
+                        f"a=candidate:"
+                        f"{c.get('foundation', '1')} "
+                        f"1 "
                         f"{c.get('protocol', 'udp')} "
                         f"{c.get('priority', 2130706431)} "
                         f"{c.get('ip', '0.0.0.0')} "
                         f"{c.get('port', 0)} "
-                        f"typ {c.get('type', 'host')}"
+                        f"typ "
+                        f"{c.get('type', 'host')}"
                     )
 
             else:
