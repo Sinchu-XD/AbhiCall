@@ -32,7 +32,10 @@ API_ID            = int(os.getenv("API_ID", "0"))
 API_HASH          = os.getenv("API_HASH", "")
 BOT_TOKEN         = os.getenv("BOT_TOKEN", "")
 ASSISTANT_SESSION = os.getenv("ASSISTANT_SESSION", "")
-STUN_URL          = os.getenv("STUN_SERVER", "stun:stun.l.google.com:19302")
+STUN_URL          = os.getenv("STUN_SERVER",   "stun:stun.l.google.com:19302")
+TURN_URL          = os.getenv("TURN_SERVER",   "")
+TURN_USERNAME     = os.getenv("TURN_USERNAME", "")
+TURN_PASSWORD     = os.getenv("TURN_PASSWORD", "")
 
 
 async def main():
@@ -61,7 +64,10 @@ async def main():
     queue_manager = QueueManager()
 
     webrtc_engine = WebRTCEngine(
-        stun_url=STUN_URL
+        stun_url=STUN_URL,
+        turn_url=TURN_URL,
+        turn_username=TURN_USERNAME,
+        turn_password=TURN_PASSWORD,
     )
 
     group_call_manager = GroupCallManager(
@@ -98,3 +104,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
