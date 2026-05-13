@@ -66,6 +66,7 @@ class SwitchableAudioTrack(MediaStreamTrack):
         frame.pts         = self._timestamp
         frame.time_base   = Fraction(1, SAMPLE_RATE)
         frame.planes[0].update(pcm_bytes)
+        logger.info(f"Frame sent: {len(pcm_bytes)}")
         self._timestamp  += FRAME_SAMPLES
         return frame
 
@@ -251,7 +252,7 @@ class WebRTCEngine:
                         answer.append(line)
 
                 answer.append("a=rtcp-mux")
-                answer.append("a=sendonly")
+                answer.append("a=recvonly")
 
                 if ssrc:
                     answer.append(f"a=ssrc:{ssrc} cname:telegram")
