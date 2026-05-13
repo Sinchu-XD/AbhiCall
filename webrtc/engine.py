@@ -1,5 +1,10 @@
 """
 webrtc/engine.py — Custom WebRTC engine (aiortc, no PyTgCalls)
+
+ROOT CAUSE OF SILENCE: two-phase (prepare_offer + finalize_connection) breaks
+aiortc's DTLS state machine. Reverted to single-phase connect() which is proven
+to work. ICE credentials are patched into the offer SDP so Telegram's consent
+refresh STUNs are accepted (fixes 40-second disconnect).
 """
 
 import asyncio
@@ -20,10 +25,14 @@ logger = logging.getLogger(__name__)
 
 SAMPLE_RATE     = 48000
 FRAME_SAMPLES   = 960
-BYTES_PER_FRAME = FRAME_SAMPLES * 2 * 2
+BYTES_PER_FRAME = FRAME_SAMPLES * 2 * 2   # s16le stereo
 
 
 class SwitchableAudioTrack(MediaStreamTrack):
+    """
+    Audio track whose pipeline can be swapped at runtime without replaceTrack().
+    get_frame() is a blocking threading.Queue call — MUST run in an executor.
+    """
     kind = "audio"
 
     def __init__(self):
@@ -42,7 +51,7 @@ class SwitchableAudioTrack(MediaStreamTrack):
         loop = asyncio.get_running_loop()
 
         if self._pipeline and self._pipeline.is_alive:
-            # MUST use run_in_executor — get_frame() blocks on threading.Queue
+            # run_in_executor is mandatory — threading.Queue.get() is blocking
             pcm_bytes = await loop.run_in_executor(
                 None, lambda: self._pipeline.get_frame(timeout=0.05)
             )
@@ -65,58 +74,67 @@ class SwitchableAudioTrack(MediaStreamTrack):
 class WebRTCEngine:
 
     def __init__(self, stun_url: str = "stun:stun.l.google.com:19302"):
-        self.stun_url        = stun_url
-        self._pc             = None
+        self.stun_url    = stun_url
+        self._pc         = None
         self._track: Optional[SwitchableAudioTrack] = None
-        self._connected      = False
-        self._local_ssrc     = 0
+        self._connected  = False
         self._on_failed: Optional[Callable] = None
 
     def set_reconnect_callback(self, callback: Callable):
         self._on_failed = callback
 
-    async def prepare_offer(self, ssrc: int) -> tuple:
+    async def connect(
+        self,
+        group_call_params: dict,
+        pipeline,
+        pre_ufrag: Optional[str] = None,
+        pre_pwd:   Optional[str] = None,
+    ) -> bool:
+        """
+        Single-phase connect — creates PC, patches ICE creds, does DTLS.
+
+        pre_ufrag / pre_pwd: the credentials already sent to Telegram in join().
+        They are patched into the offer SDP so aiortc and Telegram agree on creds.
+        """
         if self._pc:
             await self._cleanup_pc()
 
-        config = RTCConfiguration(
-            iceServers=[RTCIceServer(urls=[self.stun_url])]
-        )
-        self._pc         = RTCPeerConnection(configuration=config)
-        self._local_ssrc = ssrc
+        config   = RTCConfiguration(iceServers=[RTCIceServer(urls=[self.stun_url])])
+        self._pc = RTCPeerConnection(configuration=config)
         self._setup_callbacks()
 
+        # Wire up real pipeline immediately — same as original working code
         self._track = SwitchableAudioTrack()
-        sender      = self._pc.addTrack(self._track)
+        self._track.set_pipeline(pipeline)
+        self._pc.addTrack(self._track)
 
-        transceiver = next(
-            t for t in self._pc.getTransceivers() if t.sender == sender
+        # Build offer
+        offer     = await self._pc.createOffer()
+        offer_sdp = offer.sdp
+
+        # Patch ICE credentials to match what we already sent Telegram
+        if pre_ufrag and pre_pwd:
+            orig_ufrag, orig_pwd = self._extract_ice_credentials(offer_sdp)
+            if orig_ufrag:
+                offer_sdp = offer_sdp.replace(
+                    f"a=ice-ufrag:{orig_ufrag}", f"a=ice-ufrag:{pre_ufrag}"
+                )
+            if orig_pwd:
+                offer_sdp = offer_sdp.replace(
+                    f"a=ice-pwd:{orig_pwd}", f"a=ice-pwd:{pre_pwd}"
+                )
+            logger.info(f"ICE creds patched — ufrag: {pre_ufrag}  pwd: {pre_pwd[:8]}...")
+
+        await self._pc.setLocalDescription(
+            RTCSessionDescription(sdp=offer_sdp, type="offer")
         )
-        transceiver.direction = "sendonly"
 
-        offer = await self._pc.createOffer()
-        await self._pc.setLocalDescription(offer)
-
+        # Wait for ICE gathering to complete
         while self._pc.iceGatheringState != "complete":
             await asyncio.sleep(0.1)
 
-        offer_sdp  = self._pc.localDescription.sdp
-        ufrag, pwd = self._extract_ice_credentials(offer_sdp)
-
-        logger.info(f"Offer ICE creds — ufrag: {ufrag}  pwd: {pwd[:8]}...")
-        return offer_sdp, ufrag, pwd
-
-    async def finalize_connection(self, transport_params: dict, pipeline) -> bool:
-        if not self._pc or not self._track:
-            logger.error("prepare_offer() must be called before finalize_connection()")
-            return False
-
-        self._track.set_pipeline(pipeline)
-
-        offer_sdp  = self._pc.localDescription.sdp
-        remote_sdp = self._build_remote_sdp(offer_sdp, transport_params)
-
-        logger.debug(f"Remote SDP:\n{remote_sdp}")
+        local_sdp  = self._pc.localDescription.sdp
+        remote_sdp = self._build_remote_sdp(local_sdp, group_call_params)
 
         await self._pc.setRemoteDescription(
             RTCSessionDescription(sdp=remote_sdp, type="answer")
@@ -148,8 +166,8 @@ class WebRTCEngine:
             self._pc = None
 
     def _extract_ice_credentials(self, sdp: str) -> tuple:
-        ufrag = "telegram"
-        pwd   = "telegram"
+        ufrag = ""
+        pwd   = ""
         for line in sdp.split("\r\n"):
             if line.startswith("a=ice-ufrag:"):
                 ufrag = line[len("a=ice-ufrag:"):]
@@ -187,6 +205,7 @@ class WebRTCEngine:
         pwd        = transport.get("pwd",   "telegram")
         candidates = transport.get("candidates", [])
 
+        # Parse m= sections out of the offer
         sections     = []
         current      = []
         session_done = False
@@ -238,8 +257,8 @@ class WebRTCEngine:
                 answer.append("a=rtcp-rsize")
                 answer.append("a=sendrecv")
 
-                # DO NOT add a=ssrc here — it tells aiortc the remote is
-                # sending with that SSRC, flipping SRTP to receive-mode
+                # NO a=ssrc here — adding our SSRC to the remote answer tells
+                # aiortc the remote is sending, flipping SRTP to receive-mode
                 # and silencing all outgoing audio.
 
                 for c in candidates:
@@ -254,6 +273,7 @@ class WebRTCEngine:
                 answer.append("a=end-of-candidates")
 
             else:
+                # Disable non-audio sections
                 parts    = m_line.split()
                 parts[1] = "0"
                 answer.append(" ".join(parts))
