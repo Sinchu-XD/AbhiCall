@@ -421,7 +421,7 @@ class WebRTCEngine:
                     )
 
                 answer.append(
-                    "a=setup:active"
+                    "a=setup:passive"
                 )
 
                 for line in section[1:]:
