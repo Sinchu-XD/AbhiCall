@@ -21,7 +21,6 @@ SAMPLE_RATE   = 48000
 FRAME_SAMPLES = 960
 
 
-
 class OpusStreamTrack(MediaStreamTrack):
     kind = "audio"
 
@@ -32,17 +31,17 @@ class OpusStreamTrack(MediaStreamTrack):
 
     async def recv(self) -> AudioFrame:
         loop = asyncio.get_event_loop()
-        pcm_bytes = await loop.run_in_executor(       # ✅ naam bhi badla
+        pcm_bytes = await loop.run_in_executor(
             None, lambda: self._pipeline.get_frame(timeout=0.05)
         )
         if pcm_bytes is None:
-            pcm_bytes = b"\x00" * (FRAME_SAMPLES * 2 * 2)  # ✅ silence PCM, Opus nahi
+            pcm_bytes = b"\x00" * (FRAME_SAMPLES * 2 * 2)
 
         frame             = AudioFrame(format="s16", layout="stereo", samples=FRAME_SAMPLES)
         frame.sample_rate = SAMPLE_RATE
         frame.pts         = self._timestamp
         frame.time_base   = Fraction(1, SAMPLE_RATE)
-        frame.planes[0].update(pcm_bytes)             # ✅ YEH LINE MISSING THI — data daalo
+        frame.planes[0].update(pcm_bytes)
         self._timestamp  += FRAME_SAMPLES
         return frame
 
@@ -127,14 +126,21 @@ class WebRTCEngine:
             await asyncio.sleep(0.1)
 
     def _build_remote_sdp(self, offer_sdp: str, params: dict) -> str:
-        transport   = params.get("transport", {})
-        fingerprint = transport.get("fingerprint", {})
-        fp_hash     = fingerprint.get("hash", "sha-256")
-        fp_value    = fingerprint.get("value", "")
-        ufrag       = transport.get("ufrag", "telegram")
-        pwd         = transport.get("pwd", "telegram")
-        ssrc        = params.get("ssrc", 0)
-        candidates  = transport.get("candidates", [])
+        transport = params.get("transport", {})
+
+        # ✅ FIX: "fingerprints" list hai, key "fingerprint" hai (not "value")
+        fingerprints = transport.get("fingerprints", [])
+        if fingerprints:
+            fp_hash  = fingerprints[0].get("hash", "sha-256")
+            fp_value = fingerprints[0].get("fingerprint", "")
+        else:
+            fp_hash  = "sha-256"
+            fp_value = ""
+
+        ufrag      = transport.get("ufrag", "telegram")
+        pwd        = transport.get("pwd", "telegram")
+        ssrc       = params.get("ssrc", 0)
+        candidates = transport.get("candidates", [])
 
         # Offer se m= sections parse karo
         sections     = []
@@ -181,7 +187,7 @@ class WebRTCEngine:
                     )):
                         answer.append(line)
 
-                answer.append("a=rtcp-mux")   # ✅ FIX 3: RTCP mux
+                answer.append("a=rtcp-mux")
                 answer.append("a=sendonly")
 
                 if ssrc:
@@ -198,7 +204,6 @@ class WebRTCEngine:
                     )
 
             else:
-                # Data channel / video — reject
                 parts    = m_line.split()
                 parts[1] = "0"
                 answer.append(" ".join(parts))
