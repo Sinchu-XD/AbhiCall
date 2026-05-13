@@ -126,16 +126,6 @@ class WebRTCEngine:
         self._dtls_fired = False
 
         ice_servers = [RTCIceServer(urls=[self.stun_url])]
-        if self.turn_url:
-            # aiortc RTCIceServer only accepts urls — embed credentials in URL
-            if self.turn_username and self.turn_password:
-                # format: turn:user:pass@host:port
-                turn_part = self.turn_url[5:]  # strip "turn:"
-                turn_with_creds = f"turn:{self.turn_username}:{self.turn_password}@{turn_part}"
-            else:
-                turn_with_creds = self.turn_url
-            ice_servers.append(RTCIceServer(urls=[turn_with_creds]))
-            logger.info(f"TURN server added: {self.turn_url}")
         config   = RTCConfiguration(iceServers=ice_servers)
         self._pc = RTCPeerConnection(configuration=config)
 
@@ -443,4 +433,4 @@ class WebRTCEngine:
                         answer.append(line)
 
         return "\r\n".join(answer) + "\r\n"
-          
+      
