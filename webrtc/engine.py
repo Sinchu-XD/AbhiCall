@@ -63,7 +63,9 @@ class SwitchableAudioTrack(MediaStreamTrack):
 
         self._timestamp += FRAME_SAMPLES
 
-        logger.info(f"Sending audio frame: {len(pcm_bytes)}")
+        logger.info(
+            f"Sending audio frame: {len(pcm_bytes)}"
+        )
 
         await asyncio.sleep(0.02)
 
@@ -80,12 +82,16 @@ class WebRTCEngine:
         self.stun_url = stun_url
 
         self._pc = None
-        self._track: Optional[SwitchableAudioTrack] = None
+        self._track: Optional[
+            SwitchableAudioTrack
+        ] = None
 
         self._connected = False
         self._local_ssrc = 0
 
-        self._on_failed: Optional[Callable] = None
+        self._on_failed: Optional[
+            Callable
+        ] = None
 
     def set_reconnect_callback(
         self,
@@ -119,16 +125,26 @@ class WebRTCEngine:
 
         self._track = SwitchableAudioTrack()
 
-        self._pc.addTransceiver(
-            self._track,
-            direction="sendonly"
+        sender = self._pc.addTrack(
+            self._track
         )
+
+        transceiver = next(
+            t for t in self._pc.getTransceivers()
+            if t.sender == sender
+        )
+
+        transceiver.direction = "sendonly"
 
         logger.warning(
             f"Transceivers: {self._pc.getTransceivers()}"
         )
 
         offer = await self._pc.createOffer()
+
+        logger.warning(
+            f"LOCAL SDP:\n{offer.sdp}"
+        )
 
         await self._pc.setLocalDescription(
             offer
@@ -162,13 +178,19 @@ class WebRTCEngine:
 
             return False
 
-        self._track.set_pipeline(pipeline)
+        self._track.set_pipeline(
+            pipeline
+        )
 
         offer_sdp = self._pc.localDescription.sdp
 
         remote_sdp = self._build_remote_sdp(
             offer_sdp,
             transport_params
+        )
+
+        logger.warning(
+            f"REMOTE SDP:\n{remote_sdp}"
         )
 
         await self._pc.setRemoteDescription(
@@ -192,7 +214,9 @@ class WebRTCEngine:
 
         await self._cleanup_pc()
 
-        logger.info("WebRTC disconnected.")
+        logger.info(
+            "WebRTC disconnected."
+        )
 
     def switch_track(
         self,
@@ -228,13 +252,17 @@ class WebRTCEngine:
 
         for line in sdp.split("\r\n"):
 
-            if line.startswith("a=ice-ufrag:"):
+            if line.startswith(
+                "a=ice-ufrag:"
+            ):
                 ufrag = line.replace(
                     "a=ice-ufrag:",
                     ""
                 )
 
-            elif line.startswith("a=ice-pwd:"):
+            elif line.startswith(
+                "a=ice-pwd:"
+            ):
                 pwd = line.replace(
                     "a=ice-pwd:",
                     ""
@@ -244,7 +272,9 @@ class WebRTCEngine:
 
     def _setup_callbacks(self):
 
-        @self._pc.on("connectionstatechange")
+        @self._pc.on(
+            "connectionstatechange"
+        )
         async def on_state():
 
             state = self._pc.connectionState
@@ -253,7 +283,10 @@ class WebRTCEngine:
                 f"WebRTC state: {state}"
             )
 
-            if state in ("failed", "closed"):
+            if state in (
+                "failed",
+                "closed"
+            ):
 
                 self._connected = False
 
@@ -267,7 +300,9 @@ class WebRTCEngine:
                         self._on_failed()
                     )
 
-        @self._pc.on("iceconnectionstatechange")
+        @self._pc.on(
+            "iceconnectionstatechange"
+        )
         async def on_ice():
 
             logger.info(
@@ -281,9 +316,14 @@ class WebRTCEngine:
 
         loop = asyncio.get_event_loop()
 
-        deadline = loop.time() + timeout
+        deadline = (
+            loop.time() + timeout
+        )
 
-        while self._pc.iceGatheringState != "complete":
+        while (
+            self._pc.iceGatheringState
+            != "complete"
+        ):
 
             if loop.time() > deadline:
 
@@ -358,7 +398,9 @@ class WebRTCEngine:
             if line.startswith("m="):
 
                 if session_done:
-                    sections.append(current)
+                    sections.append(
+                        current
+                    )
 
                 else:
                     session_done = True
@@ -474,7 +516,12 @@ class WebRTCEngine:
 
                 for line in section[1:]:
 
-                    if line.startswith("a=mid"):
+                    if line.startswith(
+                        "a=mid"
+                    ):
                         answer.append(line)
 
-        return "\r\n".join(answer) + "\r\n"
+        return (
+            "\r\n".join(answer)
+            + "\r\n"
+    )
