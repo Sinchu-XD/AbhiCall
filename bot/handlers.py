@@ -7,11 +7,8 @@ import logging
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-<<<<<<< HEAD
 from core.resolver import resolve, get_valid_stream
-=======
 from core.resolver import resolve_url, format_duration
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
 from audio.pipeline import QueueManager
 from core.group_call import GroupCallManager
 
@@ -36,11 +33,8 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
             "╠ `/resume` — dobara chalao\n"
             "╚ `/queue` — queue dekho\n\n"
             "**Note:** Bot aur Assistant dono group mein hone chahiye.\n"
-<<<<<<< HEAD
             "Pehle group mein Voice Chat shuru karo, phir `/join` ya `/play` karo."
-=======
             "Pehle group mein Voice Chat shuru karo, phir `/join` karo."
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
         )
 
     # ----------------------------------------------------------------
@@ -48,11 +42,8 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
     # ----------------------------------------------------------------
     @bot.on_message(filters.command("join") & filters.group)
     async def cmd_join(_, msg: Message):
-<<<<<<< HEAD
         status  = await msg.reply_text("🔄 Voice Chat join kar raha hoon...")
-=======
         status = await msg.reply_text("🔄 Voice Chat join kar raha hoon...")
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
         success = await group_call_manager.join(msg.chat.id)
 
         if success:
@@ -81,7 +72,6 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
         query  = " ".join(msg.command[1:])
         status = await msg.reply_text(f"🔍 Dhundh raha hoon: `{query}`...")
 
-<<<<<<< HEAD
         # resolve() returns list of song dicts
         results = await resolve(query, video=False, user_id=msg.from_user.id)
         if not results:
@@ -114,7 +104,6 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
                 await msg.reply_photo(thumb, caption=text)
             else:
                 await status.edit_text(text)
-=======
         info = await resolve_url(query)
         if not info:
             await status.edit_text("❌ Song nahi mila! URL ya naam check karo.")
@@ -136,22 +125,17 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
                 f"🎵 {title} (`{duration}`)\n"
                 f"📍 Position: #{len(queue_manager.queue)}"
             )
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
             return
 
         await status.edit_text(f"⏳ Load ho raha hai: **{title}**...")
 
-<<<<<<< HEAD
         # VC join karo agar nahi hua
-=======
         # Agar VC join nahi hua toh pehle join karo
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
         if not group_call_manager.is_joined:
             joined = await group_call_manager.join(msg.chat.id)
             if not joined:
                 await status.edit_text(
                     "❌ Voice Chat join nahi ho saka!\n\n"
-<<<<<<< HEAD
                     "Pehle group mein VC shuru karo."
                 )
                 return
@@ -161,7 +145,6 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
         pipeline   = queue_manager.start_pipeline(stream_url)
 
         # WebRTC se audio connect karo
-=======
                     "Pehle group mein VC shuru karo aur `/join` karo."
                 )
                 return
@@ -170,14 +153,12 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
         pipeline = queue_manager.start_pipeline(stream_url)
 
         # WebRTC se connect karo
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
         connected = await group_call_manager.connect_audio(pipeline)
         if not connected:
             pipeline.stop()
             await status.edit_text("❌ WebRTC connect nahi ho saka!")
             return
 
-<<<<<<< HEAD
         queue_manager.set_current(song)
 
         text = (
@@ -191,7 +172,6 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
             await msg.reply_photo(thumb, caption=text)
         else:
             await status.edit_text(text)
-=======
         # Queue mein track karo
         queue_manager.add(
             title=title,
@@ -205,7 +185,6 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
             f"🎵 {title}\n"
             f"⏱ Duration: `{duration}`"
         )
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
 
     # ----------------------------------------------------------------
     # /skip
@@ -218,7 +197,6 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
 
         next_song = queue_manager.skip()
         if next_song:
-<<<<<<< HEAD
             # Fresh stream URL lo (cache expire ho sakti hai)
             stream_url = await get_valid_stream(next_song)
             if not stream_url:
@@ -234,7 +212,6 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
                 f"⏭ Skipped!\n\n"
                 f"▶️ **Ab chal raha hai:**\n"
                 f"🎵 {title}"
-=======
             pipeline = queue_manager.start_pipeline(next_song["url"])
             group_call_manager.webrtc.switch_track(pipeline)
             queue_manager.next()
@@ -242,7 +219,6 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
                 f"⏭ Skipped!\n\n"
                 f"▶️ **Ab chal raha hai:**\n"
                 f"🎵 {next_song['title']}"
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
             )
         else:
             await group_call_manager.leave()
@@ -262,11 +238,8 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
         await msg.reply_text("⏹ Band kar diya aur VC chhod diya!")
 
     # ----------------------------------------------------------------
-<<<<<<< HEAD
     # /pause
-=======
     # /pause — Pipeline buffer rok deta hai
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
     # ----------------------------------------------------------------
     @bot.on_message(filters.command("pause") & filters.group)
     async def cmd_pause(_, msg: Message):
@@ -278,11 +251,8 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
         await msg.reply_text("⏸ Paused! `/resume` se dobara chalao.")
 
     # ----------------------------------------------------------------
-<<<<<<< HEAD
     # /resume
-=======
     # /resume — Nayi pipeline se resume karo
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
     # ----------------------------------------------------------------
     @bot.on_message(filters.command("resume") & filters.group)
     async def cmd_resume(_, msg: Message):
@@ -290,7 +260,6 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
         if not current:
             await msg.reply_text("❌ Koi song nahi hai resume karne ke liye.")
             return
-<<<<<<< HEAD
 
         # Fresh stream URL lo
         stream_url = await get_valid_stream(current)
@@ -301,11 +270,9 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
         pipeline = queue_manager.start_pipeline(stream_url)
         group_call_manager.webrtc.switch_track(pipeline)
         await msg.reply_text(f"▶️ Resume! 🎵 {current.get('title', 'Unknown')}")
-=======
         pipeline = queue_manager.start_pipeline(current["url"])
         group_call_manager.webrtc.switch_track(pipeline)
         await msg.reply_text(f"▶️ Resume! 🎵 {current['title']}")
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
 
     # ----------------------------------------------------------------
     # /queue
@@ -320,7 +287,6 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
             return
 
         lines = ["📋 **Music Queue**\n"]
-<<<<<<< HEAD
 
         if current:
             dur = current.get("duration_text", "N/A")
@@ -331,13 +297,11 @@ def register_handlers(bot: Client, group_call_manager: GroupCallManager, queue_m
             for i, song in enumerate(q, 1):
                 dur = song.get("duration_text", "N/A")
                 lines.append(f"{i}. {song.get('title', 'Unknown')} `[{dur}]`")
-=======
         if current:
             lines.append(f"▶️ **Ab chal raha hai:**\n🎵 {current['title']}")
         if q:
             lines.append("\n**Aage ki line:**")
             for i, song in enumerate(q, 1):
                 lines.append(f"{i}. {song['title']}")
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
 
         await msg.reply_text("\n".join(lines))

@@ -1,6 +1,5 @@
 """
 main.py — Telegram VC Music Bot (Pyrogram + Custom WebRTC)
-==========================================================
 Bot       : Commands handle karta hai (bot token se)
 Assistant : Real account se VC join + stream karta hai (MTProto + aiortc)
 
@@ -12,11 +11,8 @@ import logging
 import os
 from dotenv import load_dotenv
 
-<<<<<<< HEAD
 from pyrogram import Client
-=======
 from pyrogram import Client, idle
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
 
 from audio.pipeline import QueueManager
 from webrtc.engine import WebRTCEngine
@@ -56,16 +52,13 @@ async def main():
     # --- Assistant client (real account, VC join karega) ---
     # Pehli baar chalane par phone number maangega → OTP daalo
     assistant = Client(
-<<<<<<< HEAD
         ASSISTANT_SESSION,
         api_id=API_ID,
         api_hash=API_HASH,
-=======
         "assistant",
         api_id=API_ID,
         api_hash=API_HASH,
         session_string=ASSISTANT_SESSION,
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
     )
 
     # --- Components ---
@@ -87,14 +80,11 @@ async def main():
             logger.info(f"✅ Bot ready       : @{me_bot.username}")
             logger.info(f"✅ Assistant ready  : @{me_asst.first_name} ({me_asst.phone_number})")
             logger.info("🎵 /play <url ya song name> se shuru karo!")
-<<<<<<< HEAD
             await asyncio.gather(
                 bot.idle(),
                 assistant.idle(),
             )
-=======
             await idle()
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
 
 
 if __name__ == "__main__":

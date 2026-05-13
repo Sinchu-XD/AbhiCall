@@ -23,17 +23,14 @@ BITRATE       = 128_000 # 128 kbps
 
 class AudioPipeline:
     """
-<<<<<<< HEAD
     Audio source (direct CDN stream URL) ko Opus frames mein convert karta hai.
 
     Flow:
         stream URL (from resolver)
-=======
     Audio source ko Opus frames mein convert karta hai.
 
     Flow:
         URL / File
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
            ↓  FFmpeg (subprocess)
         PCM s16le 48kHz stereo
            ↓  PyAV Opus encoder
@@ -62,11 +59,8 @@ class AudioPipeline:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()
-<<<<<<< HEAD
         logger.info(f"Audio pipeline started: {self.source[:60]}...")
-=======
         logger.info(f"Audio pipeline started: {self.source}")
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
 
     def stop(self):
         """Pipeline band karo."""
@@ -84,14 +78,11 @@ class AudioPipeline:
         logger.info("Audio pipeline stopped.")
 
     def get_frame(self, timeout: float = 0.1) -> bytes | None:
-<<<<<<< HEAD
         """Ek Opus frame lo (blocking with timeout)."""
-=======
         """
         Ek Opus frame lo (blocking with timeout).
         Returns: bytes | None
         """
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
         try:
             return self._queue.get(timeout=timeout)
         except queue.Empty:
@@ -110,10 +101,7 @@ class AudioPipeline:
     # ------------------------------------------------------------------
 
     def _setup_encoder(self):
-<<<<<<< HEAD
-=======
         """PyAV Opus encoder initialize karo."""
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
         codec             = av.CodecContext.create("libopus", "w")
         codec.sample_rate = SAMPLE_RATE
         codec.channels    = CHANNELS
@@ -123,7 +111,6 @@ class AudioPipeline:
         self._codec_ctx = codec
 
     def _start_ffmpeg(self) -> subprocess.Popen:
-<<<<<<< HEAD
         cmd = [
             self.ffmpeg_path,
             "-reconnect",           "1",
@@ -142,7 +129,6 @@ class AudioPipeline:
 
     def _read_loop(self):
         bytes_per_frame = FRAME_SAMPLES * CHANNELS * 2
-=======
         """
         FFmpeg process start karo:
           - kisi bhi source (URL, file) ko accept kare
@@ -172,7 +158,6 @@ class AudioPipeline:
     def _read_loop(self):
         """Background thread: PCM read karo → Opus encode karo → queue mein daalo."""
         bytes_per_frame = FRAME_SAMPLES * CHANNELS * 2  # s16le = 2 bytes/sample
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
 
         while not self._stop_event.is_set():
             raw = self._proc.stdout.read(bytes_per_frame)
@@ -181,10 +166,7 @@ class AudioPipeline:
                 break
             if len(raw) < bytes_per_frame:
                 raw += b"\x00" * (bytes_per_frame - len(raw))
-<<<<<<< HEAD
-=======
 
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
             try:
                 opus_bytes = self._encode_frame(raw)
                 if opus_bytes:
@@ -195,17 +177,14 @@ class AudioPipeline:
         self._stop_event.set()
 
     def _encode_frame(self, pcm_bytes: bytes) -> bytes | None:
-<<<<<<< HEAD
         frame             = av.AudioFrame(format="s16", layout="stereo", samples=FRAME_SAMPLES)
         frame.sample_rate = SAMPLE_RATE
         frame.planes[0].update(pcm_bytes)
-=======
         """PCM bytes → Opus frame."""
         frame             = av.AudioFrame(format="s16", layout="stereo", samples=FRAME_SAMPLES)
         frame.sample_rate = SAMPLE_RATE
         frame.planes[0].update(pcm_bytes)
 
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
         packets = self._codec_ctx.encode(frame)
         if packets:
             return bytes(packets[0])
@@ -213,7 +192,6 @@ class AudioPipeline:
 
 
 # -----------------------------------------------------------------------
-<<<<<<< HEAD
 # Queue Manager — song dicts (resolver format) store karta hai
 # -----------------------------------------------------------------------
 
@@ -243,7 +221,6 @@ class QueueManager:
 
     def skip(self) -> dict | None:
         """Current song skip karo, queue se agla lo."""
-=======
 # Queue Manager
 # -----------------------------------------------------------------------
 
@@ -259,7 +236,6 @@ class QueueManager:
         self._songs.append({"title": title, "url": url, "requested_by": requested_by})
 
     def next(self) -> dict | None:
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
         if self._pipeline:
             self._pipeline.stop()
             self._pipeline = None
@@ -269,22 +245,18 @@ class QueueManager:
         self._current = None
         return None
 
-<<<<<<< HEAD
     def stop(self):
         """Sab band karo, queue saaf karo."""
-=======
     def skip(self) -> dict | None:
         return self.next()
 
     def stop(self):
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
         if self._pipeline:
             self._pipeline.stop()
             self._pipeline = None
         self._songs.clear()
         self._current = None
 
-<<<<<<< HEAD
     # ------------------------------------------------------------------
     # Pipeline
     # ------------------------------------------------------------------
@@ -294,21 +266,16 @@ class QueueManager:
         if self._pipeline:
             self._pipeline.stop()
         pipeline = AudioPipeline(stream_url)
-=======
     def start_pipeline(self, url: str) -> AudioPipeline:
         pipeline = AudioPipeline(url)
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
         pipeline.start()
         self._pipeline = pipeline
         return pipeline
 
-<<<<<<< HEAD
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
 
-=======
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
     @property
     def current(self) -> dict | None:
         return self._current

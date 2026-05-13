@@ -1,5 +1,4 @@
 """
-<<<<<<< HEAD
 core/resolver.py
 ----------------
 YouTubeMusic module se song info aur stream URL nikalta hai.
@@ -213,7 +212,6 @@ async def get_valid_stream(song):
     except:
         LOGGER.error(format_exc())
         return None
-=======
 core/resolver.py — yt-dlp se audio URL aur info nikalta hai
 """
 
@@ -272,4 +270,3 @@ def format_duration(seconds: int) -> str:
     m, s = divmod(int(seconds), 60)
     h, m = divmod(m, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
->>>>>>> 8a23c75f2cef4ab6f1dc4ced82d2529668f0e1a5
