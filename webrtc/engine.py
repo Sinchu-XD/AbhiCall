@@ -67,8 +67,6 @@ class SwitchableAudioTrack(MediaStreamTrack):
             f"Sending audio frame: {len(pcm_bytes)}"
         )
 
-        await asyncio.sleep(0.02)
-
         return frame
 
 
@@ -82,6 +80,7 @@ class WebRTCEngine:
         self.stun_url = stun_url
 
         self._pc = None
+
         self._track: Optional[
             SwitchableAudioTrack
         ] = None
@@ -150,9 +149,15 @@ class WebRTCEngine:
             offer
         )
 
-        await self._wait_for_ice()
+        while (
+            self._pc.iceGatheringState
+            != "complete"
+        ):
+            await asyncio.sleep(0.1)
 
-        offer_sdp = self._pc.localDescription.sdp
+        offer_sdp = (
+            self._pc.localDescription.sdp
+        )
 
         ufrag, pwd = self._extract_ice_credentials(
             offer_sdp
@@ -182,7 +187,9 @@ class WebRTCEngine:
             pipeline
         )
 
-        offer_sdp = self._pc.localDescription.sdp
+        offer_sdp = (
+            self._pc.localDescription.sdp
+        )
 
         remote_sdp = self._build_remote_sdp(
             offer_sdp,
@@ -277,7 +284,9 @@ class WebRTCEngine:
         )
         async def on_state():
 
-            state = self._pc.connectionState
+            state = (
+                self._pc.connectionState
+            )
 
             logger.info(
                 f"WebRTC state: {state}"
@@ -308,32 +317,6 @@ class WebRTCEngine:
             logger.info(
                 f"ICE state: {self._pc.iceConnectionState}"
             )
-
-    async def _wait_for_ice(
-        self,
-        timeout: float = 10.0
-    ):
-
-        loop = asyncio.get_event_loop()
-
-        deadline = (
-            loop.time() + timeout
-        )
-
-        while (
-            self._pc.iceGatheringState
-            != "complete"
-        ):
-
-            if loop.time() > deadline:
-
-                logger.warning(
-                    "ICE gathering timeout"
-                )
-
-                break
-
-            await asyncio.sleep(0.1)
 
     def _build_remote_sdp(
         self,
@@ -524,4 +507,4 @@ class WebRTCEngine:
         return (
             "\r\n".join(answer)
             + "\r\n"
-    )
+        )
