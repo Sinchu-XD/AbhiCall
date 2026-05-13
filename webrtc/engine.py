@@ -330,9 +330,6 @@ class WebRTCEngine:
 
         if fingerprints:
             fp_hash  = fingerprints[0].get("hash", "sha-256")
-            # FIX: uppercase — Telegram returns lowercase hex (aa:bb:cc...) but
-            # aiortc computes & compares fingerprints in uppercase (AA:BB:CC...).
-            # Case mismatch → silent DTLS certificate verification failure → stuck.
             fp_value = fingerprints[0].get("fingerprint", "").upper()
         else:
             fp_hash  = "sha-256"
@@ -342,7 +339,6 @@ class WebRTCEngine:
         pwd        = transport.get("pwd",   "telegram")
         candidates = transport.get("candidates", [])
 
-        # Parse m= sections from offer
         sections     = []
         current      = []
         session_done = False
@@ -366,11 +362,8 @@ class WebRTCEngine:
             "o=- 0 0 IN IP4 127.0.0.1",
             "s=-",
             "t=0 0",
-            # a=ice-lite: tells aiortc the remote (Telegram) is ICE-lite,
-            # making aiortc the ICE-controlling agent. It sends USE-CANDIDATE
-            # and nominates the pair itself — ICE completes without Telegram
-            # needing to initiate.
-            "a=ice-lite",
+            # NO a=ice-lite — Telegram does full ICE (it sends binding requests
+            # and wins the tie-breaker, making itself ICE-controlling).
             "a=group:BUNDLE 0",
             "a=msid-semantic:WMS *",
         ]
@@ -385,10 +378,11 @@ class WebRTCEngine:
                 answer.append(f"a=ice-pwd:{pwd}")
                 if fp_value:
                     answer.append(f"a=fingerprint:{fp_hash} {fp_value}")
-                # a=setup:passive → Telegram (remote/answerer) is DTLS server.
-                # aiortc (offerer, ICE-controlling) becomes DTLS client and
-                # sends ClientHello. RFC 5763: controlling full agent = DTLS client.
-                answer.append("a=setup:passive")
+                # a=setup:active → Telegram is DTLS client (sends ClientHello).
+                # Telegram won the ICE tie-breaker → ICE-controlling → DTLS client.
+                # aiortc is ICE-controlled → DTLS server → waits for ClientHello.
+                # RFC 5763: ICE-controlling agent MUST be DTLS client (active).
+                answer.append("a=setup:active")
 
                 for line in section[1:]:
                     if any(line.startswith(p) for p in (
@@ -414,7 +408,6 @@ class WebRTCEngine:
                 answer.append("a=end-of-candidates")
 
             else:
-                # Disable non-audio m= sections
                 parts    = m_line.split()
                 parts[1] = "0"
                 answer.append(" ".join(parts))
