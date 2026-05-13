@@ -1,17 +1,14 @@
-import asyncio
 import subprocess
 import threading
 import queue
 import logging
-
-import av
 
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE   = 48000
 CHANNELS      = 2
 FRAME_SAMPLES = 960
-BITRATE       = 128_000
+BYTES_PER_FRAME = FRAME_SAMPLES * CHANNELS * 2  # s16le = 2 bytes/sample
 
 
 class AudioPipeline:
@@ -23,10 +20,8 @@ class AudioPipeline:
         self._thread     = None
         self._queue      = queue.Queue(maxsize=50)
         self._stop_event = threading.Event()
-        self._codec_ctx  = None
 
     def start(self):
-        self._setup_encoder()
         self._proc = self._start_ffmpeg()
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
@@ -61,15 +56,6 @@ class AudioPipeline:
             and self._thread.is_alive()
         )
 
-    def _setup_encoder(self):
-        codec             = av.CodecContext.create("libopus", "w")
-        codec.sample_rate = SAMPLE_RATE
-        codec.layout      = "stereo"        # ✅ FIX: .channels nahi, .layout use karo
-        codec.format      = av.AudioFormat("s16")
-        codec.bit_rate    = BITRATE
-        codec.open()
-        self._codec_ctx = codec
-
     def _start_ffmpeg(self) -> subprocess.Popen:
         cmd = [
             self.ffmpeg_path,
@@ -78,7 +64,7 @@ class AudioPipeline:
             "-reconnect_delay_max", "5",
             "-i",                   self.source,
             "-vn",
-            "-acodec",              "pcm_s16le",
+            "-acodec",              "pcm_s16le",   # raw PCM — aiortc khud encode karega
             "-ar",                  str(SAMPLE_RATE),
             "-ac",                  str(CHANNELS),
             "-f",                   "s16le",
@@ -88,32 +74,19 @@ class AudioPipeline:
         return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def _read_loop(self):
-        bytes_per_frame = FRAME_SAMPLES * CHANNELS * 2
-
         while not self._stop_event.is_set():
-            raw = self._proc.stdout.read(bytes_per_frame)
+            raw = self._proc.stdout.read(BYTES_PER_FRAME)
             if not raw:
                 logger.info("FFmpeg stream ended.")
                 break
-            if len(raw) < bytes_per_frame:
-                raw += b"\x00" * (bytes_per_frame - len(raw))
+            if len(raw) < BYTES_PER_FRAME:
+                raw += b"\x00" * (BYTES_PER_FRAME - len(raw))
             try:
-                opus_bytes = self._encode_frame(raw)
-                if opus_bytes:
-                    self._queue.put(opus_bytes, timeout=1)
-            except Exception as e:
-                logger.warning(f"Encode error: {e}")
+                self._queue.put(raw, timeout=1)   # raw PCM bytes, no encoding
+            except queue.Full:
+                pass
 
         self._stop_event.set()
-
-    def _encode_frame(self, pcm_bytes: bytes) -> bytes | None:
-        frame             = av.AudioFrame(format="s16", layout="stereo", samples=FRAME_SAMPLES)
-        frame.sample_rate = SAMPLE_RATE
-        frame.planes[0].update(pcm_bytes)
-        packets = self._codec_ctx.encode(frame)
-        if packets:
-            return bytes(packets[0])
-        return None
 
 
 class QueueManager:
