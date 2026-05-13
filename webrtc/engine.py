@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from fractions import Fraction
-from typing import Callable, Optional
+from typing import Callable
 
 from aiortc import (
     RTCPeerConnection,
@@ -41,11 +41,14 @@ class SwitchableAudioTrack(MediaStreamTrack):
         loop = asyncio.get_running_loop()
 
         if self._pipeline and self._pipeline.is_alive:
+
             pcm_bytes = await loop.run_in_executor(
                 None,
                 lambda: self._pipeline.get_frame(timeout=0.02)
             )
+
         else:
+
             pcm_bytes = None
 
         if pcm_bytes is None:
@@ -132,7 +135,7 @@ class WebRTCEngine:
             if t.sender == sender
         )
 
-        transceiver.direction = "sendonly"
+        transceiver.direction = "sendrecv"
 
         offer = await self._pc.createOffer()
 
@@ -524,7 +527,7 @@ class WebRTCEngine:
                     )
 
                 answer.append(
-                    "a=setup:passive"
+                    "a=setup:actpass"
                 )
 
                 for line in section[1:]:
@@ -603,4 +606,4 @@ class WebRTCEngine:
         return (
             "\r\n".join(answer)
             + "\r\n"
-            )
+        )
