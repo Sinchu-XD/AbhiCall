@@ -1,15 +1,16 @@
 """
-webrtc/engine.py — Telegram VC Fully Fixed Version
+webrtc/engine.py — FINAL TELEGRAM VC FIXED VERSION
 
-FINAL FIXES:
-  ✅ DTLS role fixed for Telegram VC
-  ✅ ICE-lite enabled
-  ✅ recvonly SDP mode
-  ✅ Fingerprint uppercase
-  ✅ Poll fallback
-  ✅ Proper SSRC extraction
-  ✅ Proper aiortc offer handling
-  ✅ DTLS timeout debugging
+FIXES:
+✅ Correct DTLS role for Telegram VC
+✅ Correct SDP m=audio port
+✅ Proper recvonly SDP
+✅ Fingerprint uppercase
+✅ Poll fallback
+✅ Proper SSRC extraction
+✅ Proper aiortc offer handling
+✅ No ice-lite bug
+✅ DTLS timeout debugging
 """
 
 import asyncio
@@ -24,6 +25,7 @@ from aiortc import (
     RTCIceServer,
     MediaStreamTrack,
 )
+
 from av import AudioFrame
 
 logger = logging.getLogger(__name__)
@@ -48,7 +50,8 @@ class SwitchableAudioTrack(MediaStreamTrack):
         self._pipeline = new_pipeline
         logger.info("Audio pipeline switched.")
 
-    async def recv(self) -> AudioFrame:
+    async def recv(self):
+
         loop = asyncio.get_running_loop()
 
         if self._pipeline and self._pipeline.is_alive:
@@ -76,16 +79,18 @@ class SwitchableAudioTrack(MediaStreamTrack):
         frame.planes[0].update(pcm_bytes)
 
         self._timestamp += FRAME_SAMPLES
+
         return frame
 
 
 class WebRTCEngine:
 
     def __init__(self, stun_url="stun:stun.l.google.com:19302"):
+
         self.stun_url = stun_url
 
-        self._pc: Optional[RTCPeerConnection] = None
-        self._track: Optional[SwitchableAudioTrack] = None
+        self._pc = None
+        self._track = None
 
         self._connected = False
         self._dtls_fired = False
@@ -108,15 +113,18 @@ class WebRTCEngine:
         self._on_connected = callback
 
     async def _fire_connected(self):
+
         if self._dtls_fired:
             return
 
         self._dtls_fired = True
 
-        logger.info("✅ DTLS connected — SRTP is flowing!")
+        logger.info("✅ DTLS connected — SRTP active!")
 
         if self._on_connected:
-            asyncio.create_task(self._on_connected())
+            asyncio.create_task(
+                self._on_connected()
+            )
 
     # =========================================================
     # PREPARE
@@ -131,11 +139,15 @@ class WebRTCEngine:
 
         config = RTCConfiguration(
             iceServers=[
-                RTCIceServer(urls=[self.stun_url])
+                RTCIceServer(
+                    urls=[self.stun_url]
+                )
             ]
         )
 
-        self._pc = RTCPeerConnection(configuration=config)
+        self._pc = RTCPeerConnection(
+            configuration=config
+        )
 
         self._track = SwitchableAudioTrack()
         self._track.set_pipeline(pipeline)
@@ -210,7 +222,7 @@ class WebRTCEngine:
 
         logger.info(
             "✅ WebRTC handshake started — "
-            "ICE/DTLS running in background..."
+            "ICE/DTLS running..."
         )
 
         asyncio.create_task(
@@ -220,7 +232,7 @@ class WebRTCEngine:
         return True
 
     # =========================================================
-    # POLL FALLBACK
+    # POLL
     # =========================================================
 
     async def _poll_connection_state(self, pc):
@@ -237,9 +249,11 @@ class WebRTCEngine:
                 return
 
             if state != last_state:
+
                 logger.info(
                     f"[poll {i+1}s] connectionState: {state}"
                 )
+
                 last_state = state
 
             if state == "connected":
@@ -248,24 +262,26 @@ class WebRTCEngine:
 
             if state in ("failed", "closed"):
 
-                logger.warning(
-                    f"WebRTC {state} — reconnecting..."
-                )
-
                 self._connected = False
 
+                logger.warning(
+                    f"WebRTC {state}"
+                )
+
                 if self._on_failed:
-                    asyncio.create_task(self._on_failed())
+                    asyncio.create_task(
+                        self._on_failed()
+                    )
 
                 return
 
         logger.error(
-            f"DTLS timed out after 60s. "
-            f"Last connectionState: {last_state}"
+            f"DTLS timed out after 60s "
+            f"(last state: {last_state})"
         )
 
     # =========================================================
-    # CALLBACKS
+    # EVENTS
     # =========================================================
 
     def _setup_callbacks(self, pc):
@@ -305,7 +321,7 @@ class WebRTCEngine:
                 pass
 
     # =========================================================
-    # REMOTE SDP
+    # SDP
     # =========================================================
 
     def _build_remote_sdp(self, offer_sdp, params):
@@ -315,19 +331,29 @@ class WebRTCEngine:
         fp_list = transport.get("fingerprints", [])
 
         if fp_list:
-            fp_hash = fp_list[0].get("hash", "sha-256")
+
+            fp_hash = fp_list[0].get(
+                "hash",
+                "sha-256"
+            )
+
             fp_value = fp_list[0].get(
                 "fingerprint",
                 ""
             ).upper()
+
         else:
+
             fp_hash = "sha-256"
             fp_value = ""
 
         ufrag = transport.get("ufrag", "telegram")
         pwd = transport.get("pwd", "telegram")
 
-        candidates = transport.get("candidates", [])
+        candidates = transport.get(
+            "candidates",
+            []
+        )
 
         answer = [
             "v=0",
@@ -366,22 +392,43 @@ class WebRTCEngine:
 
             m_line = section[0]
 
+            # =================================================
+            # AUDIO SECTION
+            # =================================================
+
             if "audio" in m_line:
 
-                answer.append(m_line)
+                parts = m_line.split()
 
-                answer.append("c=IN IP4 0.0.0.0")
+                # CRITICAL FIX
+                parts[1] = "9"
 
-                answer.append(f"a=ice-ufrag:{ufrag}")
-                answer.append(f"a=ice-pwd:{pwd}")
+                answer.append(
+                    " ".join(parts)
+                )
+
+                answer.append(
+                    "c=IN IP4 0.0.0.0"
+                )
+
+                answer.append(
+                    f"a=ice-ufrag:{ufrag}"
+                )
+
+                answer.append(
+                    f"a=ice-pwd:{pwd}"
+                )
 
                 if fp_value:
+
                     answer.append(
                         f"a=fingerprint:{fp_hash} {fp_value}"
                     )
 
                 # CRITICAL FIX
-                answer.append("a=setup:passive")
+                answer.append(
+                    "a=setup:passive"
+                )
 
                 for line in section[1:]:
 
@@ -398,15 +445,22 @@ class WebRTCEngine:
                     ):
                         answer.append(line)
 
-                answer.append("a=rtcp:9 IN IP4 0.0.0.0")
-                answer.append("a=rtcp-mux")
-                answer.append("a=rtcp-rsize")
+                answer.append(
+                    "a=rtcp:9 IN IP4 0.0.0.0"
+                )
 
-                # IMPORTANT FIX
-                answer.append("a=ice-lite")
+                answer.append(
+                    "a=rtcp-mux"
+                )
 
-                # IMPORTANT FIX
-                answer.append("a=recvonly")
+                answer.append(
+                    "a=rtcp-rsize"
+                )
+
+                # IMPORTANT
+                answer.append(
+                    "a=recvonly"
+                )
 
                 for c in candidates:
 
@@ -419,7 +473,13 @@ class WebRTCEngine:
                         f"typ {c.get('type', 'host')}"
                     )
 
-                answer.append("a=end-of-candidates")
+                answer.append(
+                    "a=end-of-candidates"
+                )
+
+            # =================================================
+            # DISABLED VIDEO/DATA
+            # =================================================
 
             else:
 
@@ -428,11 +488,16 @@ class WebRTCEngine:
                 if len(parts) >= 2:
                     parts[1] = "0"
 
-                answer.append(" ".join(parts))
+                answer.append(
+                    " ".join(parts)
+                )
 
-                answer.append("c=IN IP4 0.0.0.0")
+                answer.append(
+                    "c=IN IP4 0.0.0.0"
+                )
 
                 for line in section[1:]:
+
                     if line.startswith("a=mid"):
                         answer.append(line)
 
