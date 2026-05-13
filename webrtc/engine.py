@@ -48,6 +48,7 @@ class SwitchableAudioTrack(MediaStreamTrack):
         logger.info("Audio track pipeline switched.")
 
     async def recv(self) -> AudioFrame:
+        logger.warning("recv() called")
         loop = asyncio.get_event_loop()
 
         if self._pipeline and self._pipeline.is_alive:
@@ -103,6 +104,7 @@ class WebRTCEngine:
 
         self._track = SwitchableAudioTrack()
         self._pc.addTrack(self._track)
+        logger.warning(f"Transceivers: {self._pc.getTransceivers()}")
 
         offer = await self._pc.createOffer()
         await self._pc.setLocalDescription(offer)
@@ -252,7 +254,7 @@ class WebRTCEngine:
                         answer.append(line)
 
                 answer.append("a=rtcp-mux")
-                answer.append("a=recvonly")
+                answer.append("a=sendrecv")
 
                 if ssrc:
                     answer.append(f"a=ssrc:{ssrc} cname:telegram")
