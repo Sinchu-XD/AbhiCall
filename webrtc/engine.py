@@ -21,7 +21,7 @@ SAMPLE_RATE   = 48000
 FRAME_SAMPLES = 960
 
 
-class OpusStreamTrack(MediaStreamTrack):
+
 class OpusStreamTrack(MediaStreamTrack):
     kind = "audio"
 
