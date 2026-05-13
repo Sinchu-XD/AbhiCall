@@ -420,6 +420,9 @@ class WebRTCEngine:
             "o=- 0 0 IN IP4 127.0.0.1",
             "s=-",
             "t=0 0",
+            "a=group:BUNDLE 0",
+            "a=msid-semantic:WMS *"
+            
         ]
 
         for section in sections:
