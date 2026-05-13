@@ -452,7 +452,7 @@ class WebRTCEngine:
                 )
 
                 answer.append(
-                    "a=recvonly"
+                    "a=sendrecv"
                 )
 
                 for c in candidates:
