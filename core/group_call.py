@@ -1,20 +1,6 @@
-"""
-core/group_call.py — Fixed version
-
-FIXES:
-  1. connect_audio() calls webrtc.prepare() FIRST to get the real DTLS fingerprint,
-     then includes it in JoinGroupCall params. Root cause of silence was always
-     sending fingerprints=[] so Telegram couldn't verify DTLS → no SRTP audio.
-  2. connect_audio() calls webrtc.complete_connect() using the already-prepared PC
-     so fingerprint and ICE credentials match exactly what Telegram received.
-  3. _reconnecting flag now always resets via finally block.
-  4. Max reconnect attempts (5) with exponential backoff to stop infinite loops.
-"""
-
 import asyncio
 import json
 import logging
-import random
 from typing import Optional
 
 from pyrogram import Client
@@ -29,198 +15,487 @@ MAX_RECONNECT_ATTEMPTS = 5
 
 class GroupCallManager:
 
-    def __init__(self, client: Client, webrtc_engine: WebRTCEngine):
-        self.client            = client
-        self.webrtc            = webrtc_engine
-        self._call_ref         = None
+    def __init__(
+        self,
+        client: Client,
+        webrtc_engine: WebRTCEngine
+    ):
+
+        self.client = client
+        self.webrtc = webrtc_engine
+
+        self._call_ref = None
         self._chat_id: Optional[int] = None
-        self._joined           = False
+
+        self._joined = False
+
+        self._pipeline = None
+
         self._transport_params = {}
-        self._my_ssrc          = 0
-        self._pipeline         = None
-        self._reconnecting     = False
-        self._reconnect_count  = 0
 
-        self.webrtc.set_reconnect_callback(self._on_webrtc_failed)
+        self._reconnecting = False
+        self._reconnect_count = 0
 
-    async def join(self, chat_id: int) -> bool:
+        self.webrtc.set_reconnect_callback(
+            self._on_webrtc_failed
+        )
+
+        self.webrtc.set_connected_callback(
+            self._on_dtls_connected
+        )
+
+    async def join(
+        self,
+        chat_id: int
+    ) -> bool:
+
         if self._joined:
             await self.leave()
 
         self._chat_id = chat_id
 
-        call = await self._get_active_call(chat_id)
+        call = await self._get_active_call(
+            chat_id
+        )
+
         if not call:
-            logger.error("Is chat mein koi active Voice Chat nahi hai!")
+
+            logger.error(
+                "Is chat mein active VC nahi hai!"
+            )
+
             return False
 
         self._call_ref = raw.types.InputGroupCall(
             id=call.id,
             access_hash=call.access_hash,
         )
+
         return True
 
-    async def connect_audio(self, pipeline) -> bool:
+    async def connect_audio(
+        self,
+        pipeline
+    ) -> bool:
+
         if not self._call_ref:
-            logger.error("Pehle join() karo!")
+
+            logger.error(
+                "Pehle join() karo!"
+            )
+
             return False
 
         try:
+
             self._pipeline = pipeline
 
-            ufrag, pwd, fingerprint = await self.webrtc.prepare(pipeline)
+            (
+                ufrag,
+                pwd,
+                fingerprint,
+                ssrc
+            ) = await self.webrtc.prepare(
+                pipeline
+            )
 
-            fp_parts = fingerprint.split(" ", 1)
-            fp_hash  = fp_parts[0] if len(fp_parts) == 2 else "sha-256"
-            fp_value = fp_parts[1] if len(fp_parts) == 2 else ""
+            fp_hash = "sha-256"
+            fp_value = ""
 
-            self._my_ssrc = random.randint(1_000_000, 0x7FFFFFFF)
+            if " " in fingerprint:
+
+                fp_hash, fp_value = (
+                    fingerprint.split(
+                        " ",
+                        1
+                    )
+                )
 
             join_params = {
-                "ufrag":        ufrag,
-                "pwd":          pwd,
+
+                "ufrag": ufrag,
+
+                "pwd": pwd,
+
                 "fingerprints": [
                     {
-                        "hash":        fp_hash,
+                        "hash": fp_hash,
                         "fingerprint": fp_value,
                     }
                 ],
-                "ssrc": self._my_ssrc,
+
+                "ssrc": ssrc,
+
+                "ssrc-groups": [],
             }
 
-            logger.info(f"SSRC (local): {self._my_ssrc}")
-            logger.info(f"ICE ufrag sent to Telegram: {ufrag}")
-            logger.info(f"DTLS fingerprint sent to Telegram: {fp_hash} {fp_value[:20]}...")
+            logger.info(
+                f"SSRC (real): {ssrc}"
+            )
 
-            try:
-                result = await self.client.invoke(
-                    raw.functions.phone.JoinGroupCall(
-                        call=self._call_ref,
-                        params=raw.types.DataJSON(data=json.dumps(join_params)),
-                        muted=False,
-                        video_stopped=True,
-                        join_as=raw.types.InputPeerSelf(),
-                    )
+            logger.info(
+                f"ICE ufrag: {ufrag}"
+            )
+
+            logger.info(
+                f"DTLS fingerprint: "
+                f"{fp_hash} "
+                f"{fp_value[:20]}..."
+            )
+
+            result = await self.client.invoke(
+
+                raw.functions.phone.JoinGroupCall(
+
+                    call=self._call_ref,
+
+                    params=raw.types.DataJSON(
+                        data=json.dumps(
+                            join_params
+                        )
+                    ),
+
+                    muted=False,
+
+                    video_stopped=True,
+
+                    join_as=raw.types.InputPeerSelf(),
                 )
-            except Exception as e:
-                logger.error(f"JoinGroupCall failed: {e}")
+            )
+
+            self._transport_params = (
+                self._parse_join_response(
+                    result
+                )
+            )
+
+            logger.warning(
+                "FULL TG PARAMS:\n%s",
+                json.dumps(
+                    self._transport_params,
+                    indent=2
+                )
+            )
+
+            transport = (
+                self._transport_params
+                .get("transport", {})
+            )
+
+            fingerprints = transport.get(
+                "fingerprints",
+                []
+            )
+
+            candidates = transport.get(
+                "candidates",
+                []
+            )
+
+            if not fingerprints:
+
+                logger.error(
+                    "Telegram returned NO fingerprints"
+                )
+
                 return False
 
-            self._transport_params = self._parse_join_response(result)
-            candidates_count = len(
-                self._transport_params.get("transport", {}).get("candidates", [])
+            if not candidates:
+
+                logger.error(
+                    "Telegram returned NO ICE candidates"
+                )
+
+                return False
+
+            logger.info(
+                f"ICE candidates from Telegram: "
+                f"{len(candidates)}"
             )
-            logger.info(f"ICE candidates from Telegram: {candidates_count}")
-            logger.info(f"✅ Joined VC in chat {self._chat_id}")
+
+            logger.info(
+                f"✅ Joined VC in chat "
+                f"{self._chat_id}"
+            )
+
             self._joined = True
 
             ok = await self.webrtc.complete_connect(
-                group_call_params=self._transport_params,
+                group_call_params=
+                self._transport_params
             )
+
             if ok:
-                logger.info("✅ Audio connected!")
+
+                logger.info(
+                    "✅ WebRTC handshake started"
+                )
+
             return ok
 
         except Exception as e:
-            logger.error(f"connect_audio error: {e}")
+
+            logger.exception(
+                f"connect_audio error: {e}"
+            )
+
             return False
 
     async def leave(self):
+
         self._pipeline = None
-        self._joined   = False
+        self._joined = False
+
         if self._call_ref:
+
             try:
+
                 await self.client.invoke(
+
                     raw.functions.phone.LeaveGroupCall(
-                        call=self._call_ref, source=0
+                        call=self._call_ref,
+                        source=0
                     )
                 )
-            except Exception as e:
-                logger.warning(f"Leave error: {e}")
-        await self.webrtc.disconnect()
-        self._call_ref         = None
-        self._transport_params = {}
-        logger.info("Left group call.")
 
-    async def mute(self, muted: bool):
+            except Exception as e:
+
+                logger.warning(
+                    f"Leave error: {e}"
+                )
+
+        await self.webrtc.disconnect()
+
+        self._call_ref = None
+        self._transport_params = {}
+
+        logger.info(
+            "Left group call."
+        )
+
+    async def mute(
+        self,
+        muted: bool
+    ):
+
         if not self._call_ref:
             return
+
         try:
-            me   = await self.client.get_me()
-            peer = await self.client.resolve_peer(me.id)
+
+            me = await self.client.get_me()
+
+            peer = await self.client.resolve_peer(
+                me.id
+            )
+
             await self.client.invoke(
+
                 raw.functions.phone.EditGroupCallParticipant(
-                    call=self._call_ref, participant=peer, muted=muted,
+
+                    call=self._call_ref,
+
+                    participant=peer,
+
+                    muted=muted,
                 )
             )
+
         except Exception as e:
-            logger.warning(f"Mute error: {e}")
+
+            logger.warning(
+                f"Mute error: {e}"
+            )
+
+    async def _on_dtls_connected(self):
+
+        if not self._call_ref:
+            return
+
+        try:
+
+            me = await self.client.get_me()
+
+            peer = await self.client.resolve_peer(
+                me.id
+            )
+
+            await asyncio.sleep(0.5)
+
+            await self.client.invoke(
+
+                raw.functions.phone.EditGroupCallParticipant(
+
+                    call=self._call_ref,
+
+                    participant=peer,
+
+                    muted=False,
+                )
+            )
+
+            logger.info(
+                "✅ Participant unmuted"
+            )
+
+        except Exception as e:
+
+            logger.warning(
+                f"Unmute failed: {e}"
+            )
 
     @property
     def is_joined(self) -> bool:
         return self._joined
 
     async def _on_webrtc_failed(self):
-        if self._reconnecting or not self._chat_id:
+
+        if self._reconnecting:
+            return
+
+        if not self._chat_id:
             return
 
         pipeline = self._pipeline
-        chat_id  = self._chat_id
+
         if not pipeline:
             return
 
-        self._reconnecting    = True
-        self._joined          = False
+        self._reconnecting = True
+
+        self._joined = False
+
         self._reconnect_count += 1
 
-        if self._reconnect_count > MAX_RECONNECT_ATTEMPTS:
-            logger.error(f"Max reconnect attempts ({MAX_RECONNECT_ATTEMPTS}) reached. Giving up.")
+        if (
+            self._reconnect_count
+            > MAX_RECONNECT_ATTEMPTS
+        ):
+
+            logger.error(
+                "Max reconnect attempts reached"
+            )
+
             self._reconnecting = False
+
             return
 
-        delay = min(3 * self._reconnect_count, 15)
+        delay = min(
+            3 * self._reconnect_count,
+            15
+        )
+
         logger.warning(
-            f"WebRTC dropped — reconnecting in {delay}s "
-            f"(attempt {self._reconnect_count}/{MAX_RECONNECT_ATTEMPTS})..."
+            f"WebRTC reconnect in {delay}s "
+            f"(attempt "
+            f"{self._reconnect_count}/"
+            f"{MAX_RECONNECT_ATTEMPTS})"
         )
 
         try:
+
             await asyncio.sleep(delay)
 
-            ok = await self.join(chat_id)
+            ok = await self.join(
+                self._chat_id
+            )
+
             if not ok:
-                logger.error("Auto-reconnect: join() failed")
+
+                logger.error(
+                    "Reconnect join failed"
+                )
+
                 return
 
-            ok = await self.connect_audio(pipeline)
+            ok = await self.connect_audio(
+                pipeline
+            )
+
             if ok:
-                logger.info("✅ Auto-reconnect successful — audio resumed!")
+
+                logger.info(
+                    "✅ Auto reconnect success"
+                )
+
                 self._reconnect_count = 0
+
             else:
-                logger.error("Auto-reconnect: connect_audio() failed")
+
+                logger.error(
+                    "Reconnect connect_audio failed"
+                )
 
         finally:
+
             self._reconnecting = False
 
-    async def _get_active_call(self, chat_id: int):
+    async def _get_active_call(
+        self,
+        chat_id: int
+    ):
+
         try:
+
             full = await self.client.invoke(
+
                 raw.functions.channels.GetFullChannel(
-                    channel=await self.client.resolve_peer(chat_id)
+
+                    channel=await self.client.resolve_peer(
+                        chat_id
+                    )
                 )
             )
-            return getattr(full.full_chat, "call", None)
+
+            return getattr(
+                full.full_chat,
+                "call",
+                None
+            )
+
         except Exception as e:
-            logger.error(f"GetFullChannel failed: {e}")
+
+            logger.error(
+                f"GetFullChannel failed: {e}"
+            )
+
             return None
 
-    def _parse_join_response(self, result) -> dict:
+    def _parse_join_response(
+        self,
+        result
+    ) -> dict:
+
         try:
+
             for update in result.updates:
+
+                if hasattr(update, "params"):
+
+                    if hasattr(
+                        update.params,
+                        "data"
+                    ):
+
+                        return json.loads(
+                            update.params.data
+                        )
+
                 if hasattr(update, "call"):
-                    call = update.call
-                    if hasattr(call, "params"):
-                        return json.loads(call.params.data)
+
+                    if hasattr(
+                        update.call,
+                        "params"
+                    ):
+
+                        return json.loads(
+                            update.call.params.data
+                        )
+
         except Exception as e:
-            logger.warning(f"Could not parse join response: {e}")
+
+            logger.exception(
+                f"Join response parse failed: {e}"
+            )
+
         return {}
