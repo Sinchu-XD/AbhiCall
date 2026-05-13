@@ -1,10 +1,17 @@
 """
 webrtc/engine.py — Custom WebRTC engine (aiortc, no PyTgCalls)
 
-ROOT CAUSE OF SILENCE: two-phase (prepare_offer + finalize_connection) breaks
-aiortc's DTLS state machine. Reverted to single-phase connect() which is proven
-to work. ICE credentials are patched into the offer SDP so Telegram's consent
-refresh STUNs are accepted (fixes 40-second disconnect).
+ROOT FIX for silence + 20-35s disconnect:
+  Telegram's media server is ICE-lite — it responds to STUN checks but never
+  sends USE-CANDIDATE to nominate a pair.  Without nomination the ICE connection
+  never reaches "connected", DTLS never starts, and after ~30s aiortc gives up.
+
+  Adding `a=ice-lite` to the remote answer SDP tells aiortc:
+    "The remote is ICE-lite; YOU are controlling — nominate the pair yourself."
+  aiortc then sends USE-CANDIDATE, ICE completes, DTLS runs, audio flows.
+
+  ICE credential patch in connect() ensures Telegram's consent-refresh STUNs
+  are accepted (fixes the original 40-second disconnect).
 """
 
 import asyncio
@@ -91,10 +98,8 @@ class WebRTCEngine:
         pre_pwd:   Optional[str] = None,
     ) -> bool:
         """
-        Single-phase connect — creates PC, patches ICE creds, does DTLS.
-
-        pre_ufrag / pre_pwd: the credentials already sent to Telegram in join().
-        They are patched into the offer SDP so aiortc and Telegram agree on creds.
+        Single-phase connect. Patches ICE credentials into the offer SDP so
+        aiortc uses the same ufrag/pwd that was already registered with Telegram.
         """
         if self._pc:
             await self._cleanup_pc()
@@ -103,7 +108,7 @@ class WebRTCEngine:
         self._pc = RTCPeerConnection(configuration=config)
         self._setup_callbacks()
 
-        # Wire up real pipeline immediately — same as original working code
+        # Wire up real pipeline immediately
         self._track = SwitchableAudioTrack()
         self._track.set_pipeline(pipeline)
         self._pc.addTrack(self._track)
@@ -129,7 +134,7 @@ class WebRTCEngine:
             RTCSessionDescription(sdp=offer_sdp, type="offer")
         )
 
-        # Wait for ICE gathering to complete
+        # Wait for ICE candidate gathering
         while self._pc.iceGatheringState != "complete":
             await asyncio.sleep(0.1)
 
@@ -205,7 +210,7 @@ class WebRTCEngine:
         pwd        = transport.get("pwd",   "telegram")
         candidates = transport.get("candidates", [])
 
-        # Parse m= sections out of the offer
+        # Parse m= sections from the offer
         sections     = []
         current      = []
         session_done = False
@@ -229,6 +234,12 @@ class WebRTCEngine:
             "o=- 0 0 IN IP4 127.0.0.1",
             "s=-",
             "t=0 0",
+            # KEY FIX: Telegram's server is ICE-lite — it responds to STUN checks
+            # but never sends USE-CANDIDATE to nominate a pair.  Without this flag
+            # aiortc switches to "controlled" and waits forever for Telegram to
+            # nominate → ICE never completes → DTLS never starts → silence + dropout.
+            # With a=ice-lite aiortc stays "controlling" and nominates itself.
+            "a=ice-lite",
             "a=group:BUNDLE 0",
             "a=msid-semantic:WMS *",
         ]
@@ -243,7 +254,7 @@ class WebRTCEngine:
                 answer.append(f"a=ice-pwd:{pwd}")
                 if fp_value:
                     answer.append(f"a=fingerprint:{fp_hash} {fp_value}")
-                answer.append("a=setup:passive")
+                answer.append("a=setup:passive")   # Telegram = DTLS server; aiortc initiates
 
                 for line in section[1:]:
                     if any(line.startswith(p) for p in (
@@ -257,9 +268,9 @@ class WebRTCEngine:
                 answer.append("a=rtcp-rsize")
                 answer.append("a=sendrecv")
 
-                # NO a=ssrc here — adding our SSRC to the remote answer tells
-                # aiortc the remote is sending, flipping SRTP to receive-mode
-                # and silencing all outgoing audio.
+                # NO a=ssrc — adding our SSRC to the remote answer tells aiortc
+                # the remote is sending with that SSRC → SRTP flips to receive-mode
+                # → all outgoing audio is silenced.
 
                 for c in candidates:
                     answer.append(
@@ -273,7 +284,7 @@ class WebRTCEngine:
                 answer.append("a=end-of-candidates")
 
             else:
-                # Disable non-audio sections
+                # Disable non-audio m= sections
                 parts    = m_line.split()
                 parts[1] = "0"
                 answer.append(" ".join(parts))
