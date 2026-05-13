@@ -126,6 +126,16 @@ class WebRTCEngine:
         self._dtls_fired = False
 
         ice_servers = [RTCIceServer(urls=[self.stun_url])]
+        if self.turn_url:
+             ice_servers.append(RTCIceServer(
+                 urls=[self.turn_url],
+                 username=self.turn_username,
+                 password=self.turn_password,
+            ))
+
+
+
+            logger.info(f"TURN server added: {self.turn_url}")
         config   = RTCConfiguration(iceServers=ice_servers)
         self._pc = RTCPeerConnection(configuration=config)
 
