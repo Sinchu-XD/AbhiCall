@@ -1,10 +1,21 @@
 """
 webrtc/engine.py — Custom WebRTC engine (aiortc, no PyTgCalls)
+
+FIXES APPLIED:
+  1. Two-phase connect: prepare_offer() extracts real ICE credentials (ufrag/pwd)
+     so GroupCallManager can send them to Telegram — fixes "Consent to send expired".
+  2. _build_remote_sdp now uses self._local_ssrc instead of params.get("ssrc", 0)
+     which was always 0 — fixes the a=ssrc:0 bug.
+  3. a=setup:active instead of a=setup:passive — bot is DTLS client, Telegram server.
+  4. SwitchableAudioTrack: single track object that can be silent or stream real audio,
+     avoiding the need for replaceTrack() between phases.
+  5. Reconnect callback: when connectionState fails, GroupCallManager is notified.
 """
 
 import asyncio
 import logging
 from fractions import Fraction
+from typing import Callable, Optional
 
 from aiortc import (
     RTCPeerConnection,
@@ -21,20 +32,33 @@ SAMPLE_RATE   = 48000
 FRAME_SAMPLES = 960
 
 
-class OpusStreamTrack(MediaStreamTrack):
+class SwitchableAudioTrack(MediaStreamTrack):
     kind = "audio"
 
-    def __init__(self, pipeline):
+    def __init__(self):
         super().__init__()
-        self._pipeline  = pipeline
+        self._pipeline  = None
         self._timestamp = 0
+
+    def set_pipeline(self, pipeline):
+        self._pipeline = pipeline
+
+    def switch_pipeline(self, new_pipeline):
+        self._pipeline = new_pipeline
+        logger.info("Audio track pipeline switched.")
 
     async def recv(self) -> AudioFrame:
         loop = asyncio.get_event_loop()
-        pcm_bytes = await loop.run_in_executor(
-            None, lambda: self._pipeline.get_frame(timeout=0.05)
-        )
+
+        if self._pipeline and self._pipeline.is_alive:
+            pcm_bytes = await loop.run_in_executor(
+                None, lambda: self._pipeline.get_frame(timeout=0.05)
+            )
+        else:
+            pcm_bytes = None
+
         if pcm_bytes is None:
+            await asyncio.sleep(0.02)
             pcm_bytes = b"\x00" * (FRAME_SAMPLES * 2 * 2)
 
         frame             = AudioFrame(format="s16", layout="stereo", samples=FRAME_SAMPLES)
@@ -45,36 +69,63 @@ class OpusStreamTrack(MediaStreamTrack):
         self._timestamp  += FRAME_SAMPLES
         return frame
 
-    def switch_pipeline(self, new_pipeline):
-        self._pipeline = new_pipeline
-        logger.info("Audio track pipeline switched.")
-
 
 class WebRTCEngine:
 
     def __init__(self, stun_url: str = "stun:stun.l.google.com:19302"):
-        self.stun_url   = stun_url
-        self._pc        = None
-        self._track     = None
-        self._connected = False
+        self.stun_url        = stun_url
+        self._pc             = None
+        self._track: Optional[SwitchableAudioTrack] = None
+        self._connected      = False
+        self._local_ssrc     = 0
+        self._on_failed: Optional[Callable] = None
 
-    async def connect(self, group_call_params: dict, pipeline) -> dict:
-        config   = RTCConfiguration(
+    def set_reconnect_callback(self, callback: Callable):
+        self._on_failed = callback
+
+    async def prepare_offer(self, ssrc: int) -> tuple:
+        """
+        Phase 1 — call BEFORE joining Telegram.
+        Creates PC + silent track, generates offer, waits for ICE,
+        returns (offer_sdp, ufrag, pwd) — the real ICE credentials to
+        send to Telegram in JoinGroupCall.
+        """
+        if self._pc:
+            await self._cleanup_pc()
+
+        config = RTCConfiguration(
             iceServers=[RTCIceServer(urls=[self.stun_url])]
         )
-        self._pc = RTCPeerConnection(configuration=config)
+        self._pc         = RTCPeerConnection(configuration=config)
+        self._local_ssrc = ssrc
         self._setup_callbacks()
 
-        self._track = OpusStreamTrack(pipeline)
+        self._track = SwitchableAudioTrack()
         self._pc.addTrack(self._track)
 
         offer = await self._pc.createOffer()
         await self._pc.setLocalDescription(offer)
-
         await self._wait_for_ice()
 
         offer_sdp  = self._pc.localDescription.sdp
-        remote_sdp = self._build_remote_sdp(offer_sdp, group_call_params)
+        ufrag, pwd = self._extract_ice_credentials(offer_sdp)
+
+        logger.info(f"Offer ICE creds — ufrag: {ufrag}  pwd: {pwd[:8]}...")
+        return offer_sdp, ufrag, pwd
+
+    async def finalize_connection(self, transport_params: dict, pipeline) -> bool:
+        """
+        Phase 2 — call AFTER Telegram returns transport params.
+        Switches track to real audio pipeline, sets remote description.
+        """
+        if not self._pc or not self._track:
+            logger.error("prepare_offer() must be called before finalize_connection()")
+            return False
+
+        self._track.set_pipeline(pipeline)
+
+        offer_sdp  = self._pc.localDescription.sdp
+        remote_sdp = self._build_remote_sdp(offer_sdp, transport_params)
 
         await self._pc.setRemoteDescription(
             RTCSessionDescription(sdp=remote_sdp, type="answer")
@@ -82,18 +133,11 @@ class WebRTCEngine:
 
         self._connected = True
         logger.info("✅ WebRTC connected to Telegram Group Call!")
-
-        return {
-            "sdp":  self._pc.localDescription.sdp,
-            "type": self._pc.localDescription.type,
-        }
+        return True
 
     async def disconnect(self):
-        if self._track:
-            self._track.stop()
-        if self._pc:
-            await self._pc.close()
         self._connected = False
+        await self._cleanup_pc()
         logger.info("WebRTC disconnected.")
 
     def switch_track(self, new_pipeline):
@@ -104,6 +148,24 @@ class WebRTCEngine:
     def is_connected(self) -> bool:
         return self._connected
 
+    async def _cleanup_pc(self):
+        if self._track:
+            self._track.stop()
+            self._track = None
+        if self._pc:
+            await self._pc.close()
+            self._pc = None
+
+    def _extract_ice_credentials(self, sdp: str) -> tuple:
+        ufrag = "telegram"
+        pwd   = "telegram"
+        for line in sdp.split("\r\n"):
+            if line.startswith("a=ice-ufrag:"):
+                ufrag = line[len("a=ice-ufrag:"):]
+            elif line.startswith("a=ice-pwd:"):
+                pwd   = line[len("a=ice-pwd:"):]
+        return ufrag, pwd
+
     def _setup_callbacks(self):
         @self._pc.on("connectionstatechange")
         async def on_state():
@@ -111,6 +173,9 @@ class WebRTCEngine:
             logger.info(f"WebRTC state: {state}")
             if state in ("failed", "closed"):
                 self._connected = False
+                if self._on_failed:
+                    logger.warning("WebRTC failed — triggering reconnect callback...")
+                    asyncio.create_task(self._on_failed())
 
         @self._pc.on("iceconnectionstatechange")
         async def on_ice():
@@ -126,9 +191,8 @@ class WebRTCEngine:
             await asyncio.sleep(0.1)
 
     def _build_remote_sdp(self, offer_sdp: str, params: dict) -> str:
-        transport = params.get("transport", {})
+        transport    = params.get("transport", {})
 
-        # ✅ FIX: "fingerprints" list hai, key "fingerprint" hai (not "value")
         fingerprints = transport.get("fingerprints", [])
         if fingerprints:
             fp_hash  = fingerprints[0].get("hash", "sha-256")
@@ -138,11 +202,10 @@ class WebRTCEngine:
             fp_value = ""
 
         ufrag      = transport.get("ufrag", "telegram")
-        pwd        = transport.get("pwd", "telegram")
-        ssrc       = params.get("ssrc", 0)
+        pwd        = transport.get("pwd",   "telegram")
+        ssrc       = self._local_ssrc   # FIX: was params.get("ssrc", 0) — always 0
         candidates = transport.get("candidates", [])
 
-        # Offer se m= sections parse karo
         sections     = []
         current      = []
         session_done = False
@@ -179,7 +242,7 @@ class WebRTCEngine:
                 answer.append(f"a=ice-pwd:{pwd}")
                 if fp_value:
                     answer.append(f"a=fingerprint:{fp_hash} {fp_value}")
-                answer.append("a=setup:passive")
+                answer.append("a=setup:active")   # FIX: was "passive"
 
                 for line in section[1:]:
                     if any(line.startswith(p) for p in (
