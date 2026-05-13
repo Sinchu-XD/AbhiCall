@@ -1,9 +1,14 @@
 """
-core/group_call.py — Fixed v3
+core/group_call.py — Final Fixed Version
 
-KEY FIX: Uses the real SSRC from webrtc.prepare() in JoinGroupCall.
-Previously we sent a random SSRC, so Telegram could not match our
-RTP packets to the participant → every packet was dropped → silence.
+All fixes:
+  1. webrtc.prepare() called BEFORE JoinGroupCall → real DTLS fingerprint sent
+  2. Real SSRC from aiortc offer SDP used (not random) → Telegram matches RTP packets
+  3. ssrc-groups field added to join_params → required by some Telegram servers
+  4. Explicit unmute after connecting → Telegram auto-mutes new participants
+  5. _parse_join_response checks UpdateGroupCallConnection.params directly
+  6. _reconnecting flag always resets in finally block
+  7. Max 5 reconnect attempts with exponential backoff
 """
 
 import asyncio
@@ -65,8 +70,8 @@ class GroupCallManager:
         try:
             self._pipeline = pipeline
 
-            # PHASE 1: Create WebRTC PC, get REAL credentials
-            # Returns (ufrag, pwd, fingerprint, ssrc) — all from aiortc's offer SDP
+            # PHASE 1: Create WebRTC PC, get real credentials from aiortc
+            # Returns (ufrag, pwd, fingerprint, ssrc) — all extracted from offer SDP
             ufrag, pwd, fingerprint, ssrc = await self.webrtc.prepare(pipeline)
 
             fp_parts = fingerprint.split(" ", 1)
@@ -77,16 +82,15 @@ class GroupCallManager:
                 "ufrag":        ufrag,
                 "pwd":          pwd,
                 "fingerprints": [{"hash": fp_hash, "fingerprint": fp_value}],
-                # FIX: real SSRC from aiortc — not random.
-                # Telegram uses this to match incoming RTP to the right participant.
-                "ssrc":         ssrc,
+                "ssrc":         ssrc,        # real SSRC — Telegram matches RTP by this
+                "ssrc-groups":  [],          # required by some Telegram server versions
             }
 
             logger.info(f"SSRC (real, from aiortc): {ssrc}")
             logger.info(f"ICE ufrag sent to Telegram: {ufrag}")
             logger.info(f"DTLS fingerprint sent to Telegram: {fp_hash} {fp_value[:20]}...")
 
-            # PHASE 2: JoinGroupCall
+            # PHASE 2: JoinGroupCall with real credentials
             try:
                 result = await self.client.invoke(
                     raw.functions.phone.JoinGroupCall(
@@ -110,12 +114,17 @@ class GroupCallManager:
             logger.info(f"✅ Joined VC in chat {self._chat_id}")
             self._joined = True
 
-            # PHASE 3: Complete WebRTC handshake (ICE + DTLS run async in background)
+            # PHASE 3: Complete WebRTC handshake (ICE + DTLS run async)
             ok = await self.webrtc.complete_connect(
                 group_call_params=self._transport_params,
             )
+
             if ok:
                 logger.info("✅ Audio connected — waiting for DTLS to complete...")
+                # Explicitly unmute — Telegram auto-mutes new participants on some groups
+                await asyncio.sleep(1)
+                await self._unmute_self()
+
             return ok
 
         except Exception as e:
@@ -207,6 +216,24 @@ class GroupCallManager:
     # Private helpers
     # ------------------------------------------------------------------
 
+    async def _unmute_self(self):
+        """Explicitly unmute — Telegram sometimes auto-mutes participants on join."""
+        if not self._call_ref:
+            return
+        try:
+            me   = await self.client.get_me()
+            peer = await self.client.resolve_peer(me.id)
+            await self.client.invoke(
+                raw.functions.phone.EditGroupCallParticipant(
+                    call=self._call_ref,
+                    participant=peer,
+                    muted=False,
+                )
+            )
+            logger.info("✅ Participant unmuted — audio should now relay to members.")
+        except Exception as e:
+            logger.warning(f"Unmute failed: {e}")
+
     async def _get_active_call(self, chat_id: int):
         try:
             full = await self.client.invoke(
@@ -223,15 +250,18 @@ class GroupCallManager:
         """
         Telegram returns UpdateGroupCallConnection which has `params` as a
         direct field — not nested under `update.call.params`.
+        Logs all update types if parsing fails so we can debug further.
         """
         try:
             for update in result.updates:
                 update_type = type(update).__name__
 
+                # Primary: UpdateGroupCallConnection — params is a direct field
                 if hasattr(update, "params") and hasattr(update.params, "data"):
                     logger.info(f"Transport params found in {update_type}.params")
                     return json.loads(update.params.data)
 
+                # Fallback: older API shape
                 if hasattr(update, "call") and hasattr(update.call, "params"):
                     logger.info(f"Transport params found in {update_type}.call.params")
                     return json.loads(update.call.params.data)
