@@ -217,7 +217,7 @@ class WebRTCEngine:
             )
         )
 
-        await asyncio.sleep(2)
+        await asyncio.sleep(5)
 
         logger.warning(
             f"Connection state after SDP: "
@@ -507,6 +507,7 @@ class WebRTCEngine:
                         f"typ "
                         f"{c.get('type', 'host')}"
                     )
+                answer.append("a=end-of-candidates")
 
             else:
 
