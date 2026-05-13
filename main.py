@@ -11,7 +11,6 @@ import logging
 import os
 from dotenv import load_dotenv
 
-from pyrogram import Client
 from pyrogram import Client, idle
 
 from audio.pipeline import QueueManager
@@ -24,6 +23,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%H:%M:%S",
 )
+
 logger = logging.getLogger("main")
 
 load_dotenv()
@@ -31,7 +31,7 @@ load_dotenv()
 API_ID            = int(os.getenv("API_ID", "0"))
 API_HASH          = os.getenv("API_HASH", "")
 BOT_TOKEN         = os.getenv("BOT_TOKEN", "")
-ASSISTANT_SESSION = os.getenv("ASSISTANT_SESSION", "assistant")
+ASSISTANT_SESSION = os.getenv("ASSISTANT_SESSION", "")
 STUN_URL          = os.getenv("STUN_SERVER", "stun:stun.l.google.com:19302")
 
 
@@ -41,7 +41,7 @@ async def main():
         logger.error("   cp .env.example .env  → phir values bharo")
         return
 
-    # --- Bot client (commands ke liye, bot token) ---
+    # --- Bot client ---
     bot = Client(
         "bot",
         api_id=API_ID,
@@ -49,12 +49,8 @@ async def main():
         bot_token=BOT_TOKEN,
     )
 
-    # --- Assistant client (real account, VC join karega) ---
-    # Pehli baar chalane par phone number maangega → OTP daalo
+    # --- Assistant client ---
     assistant = Client(
-        ASSISTANT_SESSION,
-        api_id=API_ID,
-        api_hash=API_HASH,
         "assistant",
         api_id=API_ID,
         api_hash=API_HASH,
@@ -62,29 +58,42 @@ async def main():
     )
 
     # --- Components ---
-    queue_manager      = QueueManager()
-    webrtc_engine      = WebRTCEngine(stun_url=STUN_URL)
+    queue_manager = QueueManager()
+
+    webrtc_engine = WebRTCEngine(
+        stun_url=STUN_URL
+    )
+
     group_call_manager = GroupCallManager(
-        client=assistant,           # assistant wala client use karo
+        client=assistant,
         webrtc_engine=webrtc_engine,
     )
 
-    register_handlers(bot, group_call_manager, queue_manager)
+    register_handlers(
+        bot,
+        group_call_manager,
+        queue_manager
+    )
 
     logger.info("🚀 Starting bot and assistant...")
 
-    async with assistant:
-        async with bot:
-            me_bot  = await bot.get_me()
-            me_asst = await assistant.get_me()
-            logger.info(f"✅ Bot ready       : @{me_bot.username}")
-            logger.info(f"✅ Assistant ready  : @{me_asst.first_name} ({me_asst.phone_number})")
-            logger.info("🎵 /play <url ya song name> se shuru karo!")
-            await asyncio.gather(
-                bot.idle(),
-                assistant.idle(),
-            )
-            await idle()
+    await assistant.start()
+    await bot.start()
+
+    me_bot = await bot.get_me()
+    me_asst = await assistant.get_me()
+
+    logger.info(f"✅ Bot ready       : @{me_bot.username}")
+    logger.info(
+        f"✅ Assistant ready : {me_asst.first_name}"
+    )
+
+    logger.info("🎵 /play <song name>")
+
+    await idle()
+
+    await bot.stop()
+    await assistant.stop()
 
 
 if __name__ == "__main__":
