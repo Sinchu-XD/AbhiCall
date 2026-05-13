@@ -1,17 +1,14 @@
 """
-webrtc/engine.py — Custom WebRTC engine (aiortc, no PyTgCalls)
+webrtc/engine.py — Fixed version
 
-ROOT FIX for silence + 20-35s disconnect:
-  Telegram's media server is ICE-lite — it responds to STUN checks but never
-  sends USE-CANDIDATE to nominate a pair.  Without nomination the ICE connection
-  never reaches "connected", DTLS never starts, and after ~30s aiortc gives up.
-
-  Adding `a=ice-lite` to the remote answer SDP tells aiortc:
-    "The remote is ICE-lite; YOU are controlling — nominate the pair yourself."
-  aiortc then sends USE-CANDIDATE, ICE completes, DTLS runs, audio flows.
-
-  ICE credential patch in connect() ensures Telegram's consent-refresh STUNs
-  are accepted (fixes the original 40-second disconnect).
+FIXES:
+  1. prepare() method — creates PC + offer BEFORE JoinGroupCall so real DTLS
+     fingerprint can be extracted and sent to Telegram. This is the root cause
+     of silence: empty fingerprints = no verified DTLS = no SRTP audio.
+  2. Null-guard in callbacks — captures `pc` as a closure variable so callbacks
+     don't crash with AttributeError when self._pc is set to None during cleanup.
+  3. complete_connect() replaces connect() — uses the already-prepared PC instead
+     of creating a new one, so fingerprint matches what Telegram received.
 """
 
 import asyncio
@@ -36,10 +33,6 @@ BYTES_PER_FRAME = FRAME_SAMPLES * 2 * 2   # s16le stereo
 
 
 class SwitchableAudioTrack(MediaStreamTrack):
-    """
-    Audio track whose pipeline can be swapped at runtime without replaceTrack().
-    get_frame() is a blocking threading.Queue call — MUST run in an executor.
-    """
     kind = "audio"
 
     def __init__(self):
@@ -58,7 +51,6 @@ class SwitchableAudioTrack(MediaStreamTrack):
         loop = asyncio.get_running_loop()
 
         if self._pipeline and self._pipeline.is_alive:
-            # run_in_executor is mandatory — threading.Queue.get() is blocking
             pcm_bytes = await loop.run_in_executor(
                 None, lambda: self._pipeline.get_frame(timeout=0.05)
             )
@@ -81,65 +73,68 @@ class SwitchableAudioTrack(MediaStreamTrack):
 class WebRTCEngine:
 
     def __init__(self, stun_url: str = "stun:stun.l.google.com:19302"):
-        self.stun_url    = stun_url
-        self._pc         = None
+        self.stun_url     = stun_url
+        self._pc          = None
         self._track: Optional[SwitchableAudioTrack] = None
-        self._connected  = False
+        self._connected   = False
         self._on_failed: Optional[Callable] = None
+
+        self._prepared_offer_sdp: Optional[str] = None
+        self._prepared_ufrag:     Optional[str] = None
+        self._prepared_pwd:       Optional[str] = None
+        self._prepared_fp:        Optional[str] = None
 
     def set_reconnect_callback(self, callback: Callable):
         self._on_failed = callback
 
-    async def connect(
-        self,
-        group_call_params: dict,
-        pipeline,
-        pre_ufrag: Optional[str] = None,
-        pre_pwd:   Optional[str] = None,
-    ) -> bool:
+    async def prepare(self, pipeline) -> tuple[str, str, str]:
         """
-        Single-phase connect. Patches ICE credentials into the offer SDP so
-        aiortc uses the same ufrag/pwd that was already registered with Telegram.
+        Call BEFORE JoinGroupCall.
+        Creates PC + offer, gathers ICE, returns (ufrag, pwd, fingerprint)
+        so they can be sent to Telegram in JoinGroupCall.
         """
         if self._pc:
             await self._cleanup_pc()
 
-        config   = RTCConfiguration(iceServers=[RTCIceServer(urls=[self.stun_url])])
-        self._pc = RTCPeerConnection(configuration=config)
-        self._setup_callbacks()
+        config    = RTCConfiguration(iceServers=[RTCIceServer(urls=[self.stun_url])])
+        self._pc  = RTCPeerConnection(configuration=config)
 
-        # Wire up real pipeline immediately
         self._track = SwitchableAudioTrack()
         self._track.set_pipeline(pipeline)
         self._pc.addTrack(self._track)
 
-        # Build offer
-        offer     = await self._pc.createOffer()
-        offer_sdp = offer.sdp
-
-        # Patch ICE credentials to match what we already sent Telegram
-        if pre_ufrag and pre_pwd:
-            orig_ufrag, orig_pwd = self._extract_ice_credentials(offer_sdp)
-            if orig_ufrag:
-                offer_sdp = offer_sdp.replace(
-                    f"a=ice-ufrag:{orig_ufrag}", f"a=ice-ufrag:{pre_ufrag}"
-                )
-            if orig_pwd:
-                offer_sdp = offer_sdp.replace(
-                    f"a=ice-pwd:{orig_pwd}", f"a=ice-pwd:{pre_pwd}"
-                )
-            logger.info(f"ICE creds patched — ufrag: {pre_ufrag}  pwd: {pre_pwd[:8]}...")
-
+        offer = await self._pc.createOffer()
         await self._pc.setLocalDescription(
-            RTCSessionDescription(sdp=offer_sdp, type="offer")
+            RTCSessionDescription(sdp=offer.sdp, type="offer")
         )
 
-        # Wait for ICE candidate gathering
         while self._pc.iceGatheringState != "complete":
             await asyncio.sleep(0.1)
 
-        local_sdp  = self._pc.localDescription.sdp
-        remote_sdp = self._build_remote_sdp(local_sdp, group_call_params)
+        local_sdp   = self._pc.localDescription.sdp
+        ufrag, pwd  = self._extract_ice_credentials(local_sdp)
+        fingerprint = self._extract_fingerprint(local_sdp)
+
+        self._prepared_offer_sdp = local_sdp
+        self._prepared_ufrag     = ufrag
+        self._prepared_pwd       = pwd
+        self._prepared_fp        = fingerprint
+
+        logger.info(f"WebRTC prepared — ufrag: {ufrag}  fingerprint: {fingerprint[:30]}...")
+        return ufrag, pwd, fingerprint
+
+    async def complete_connect(self, group_call_params: dict) -> bool:
+        """
+        Call AFTER JoinGroupCall succeeds.
+        Registers callbacks and sets remote description to finish the handshake.
+        """
+        if not self._pc or not self._prepared_offer_sdp:
+            logger.error("complete_connect() called before prepare()!")
+            return False
+
+        self._setup_callbacks(self._pc)
+
+        remote_sdp = self._build_remote_sdp(self._prepared_offer_sdp, group_call_params)
 
         await self._pc.setRemoteDescription(
             RTCSessionDescription(sdp=remote_sdp, type="answer")
@@ -150,7 +145,11 @@ class WebRTCEngine:
         return True
 
     async def disconnect(self):
-        self._connected = False
+        self._connected          = False
+        self._prepared_offer_sdp = None
+        self._prepared_ufrag     = None
+        self._prepared_pwd       = None
+        self._prepared_fp        = None
         await self._cleanup_pc()
         logger.info("WebRTC disconnected.")
 
@@ -170,7 +169,7 @@ class WebRTCEngine:
             await self._pc.close()
             self._pc = None
 
-    def _extract_ice_credentials(self, sdp: str) -> tuple:
+    def _extract_ice_credentials(self, sdp: str) -> tuple[str, str]:
         ufrag = ""
         pwd   = ""
         for line in sdp.split("\r\n"):
@@ -180,10 +179,23 @@ class WebRTCEngine:
                 pwd   = line[len("a=ice-pwd:"):]
         return ufrag, pwd
 
-    def _setup_callbacks(self):
-        @self._pc.on("connectionstatechange")
+    def _extract_fingerprint(self, sdp: str) -> str:
+        for line in sdp.split("\r\n"):
+            if line.startswith("a=fingerprint:"):
+                return line[len("a=fingerprint:"):]
+        return ""
+
+    def _setup_callbacks(self, pc: RTCPeerConnection):
+        """
+        FIX: `pc` captured as closure variable — NOT self._pc.
+        Prevents AttributeError when self._pc becomes None during cleanup.
+        """
+        @pc.on("connectionstatechange")
         async def on_state():
-            state = self._pc.connectionState
+            try:
+                state = pc.connectionState
+            except Exception:
+                return
             logger.info(f"WebRTC state: {state}")
             if state in ("failed", "closed"):
                 self._connected = False
@@ -191,14 +203,17 @@ class WebRTCEngine:
                     logger.warning("WebRTC failed — triggering reconnect...")
                     asyncio.create_task(self._on_failed())
 
-        @self._pc.on("iceconnectionstatechange")
+        @pc.on("iceconnectionstatechange")
         async def on_ice():
-            logger.info(f"ICE state: {self._pc.iceConnectionState}")
+            try:
+                logger.info(f"ICE state: {pc.iceConnectionState}")
+            except Exception:
+                pass
 
     def _build_remote_sdp(self, offer_sdp: str, params: dict) -> str:
         transport    = params.get("transport", {})
-
         fingerprints = transport.get("fingerprints", [])
+
         if fingerprints:
             fp_hash  = fingerprints[0].get("hash", "sha-256")
             fp_value = fingerprints[0].get("fingerprint", "")
@@ -210,7 +225,6 @@ class WebRTCEngine:
         pwd        = transport.get("pwd",   "telegram")
         candidates = transport.get("candidates", [])
 
-        # Parse m= sections from the offer
         sections     = []
         current      = []
         session_done = False
@@ -234,11 +248,6 @@ class WebRTCEngine:
             "o=- 0 0 IN IP4 127.0.0.1",
             "s=-",
             "t=0 0",
-            # KEY FIX: Telegram's server is ICE-lite — it responds to STUN checks
-            # but never sends USE-CANDIDATE to nominate a pair.  Without this flag
-            # aiortc switches to "controlled" and waits forever for Telegram to
-            # nominate → ICE never completes → DTLS never starts → silence + dropout.
-            # With a=ice-lite aiortc stays "controlling" and nominates itself.
             "a=ice-lite",
             "a=group:BUNDLE 0",
             "a=msid-semantic:WMS *",
@@ -254,7 +263,7 @@ class WebRTCEngine:
                 answer.append(f"a=ice-pwd:{pwd}")
                 if fp_value:
                     answer.append(f"a=fingerprint:{fp_hash} {fp_value}")
-                answer.append("a=setup:passive")   # Telegram = DTLS server; aiortc initiates
+                answer.append("a=setup:passive")
 
                 for line in section[1:]:
                     if any(line.startswith(p) for p in (
@@ -268,10 +277,6 @@ class WebRTCEngine:
                 answer.append("a=rtcp-rsize")
                 answer.append("a=sendrecv")
 
-                # NO a=ssrc — adding our SSRC to the remote answer tells aiortc
-                # the remote is sending with that SSRC → SRTP flips to receive-mode
-                # → all outgoing audio is silenced.
-
                 for c in candidates:
                     answer.append(
                         f"a=candidate:{c.get('foundation', '1')} 1 "
@@ -284,7 +289,6 @@ class WebRTCEngine:
                 answer.append("a=end-of-candidates")
 
             else:
-                # Disable non-audio m= sections
                 parts    = m_line.split()
                 parts[1] = "0"
                 answer.append(" ".join(parts))
