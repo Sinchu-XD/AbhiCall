@@ -1,0 +1,8 @@
+pyrogram==2.0.106
+TgCrypto==1.2.5
+aiortc==1.9.0
+yt-dlp>=2024.1.0
+av==14.0.0
+aiofiles==24.1.0
+python-dotenv==1.0.0
+cryptography>=44.0.0
