@@ -72,7 +72,6 @@ class WebRTCEngine:
 
         await self._wait_for_ice()
 
-        # ✅ FIX: offer ka actual SDP pass karo taaki answer match kare
         offer_sdp  = self._pc.localDescription.sdp
         remote_sdp = self._build_remote_sdp(offer_sdp, group_call_params)
 
@@ -126,12 +125,6 @@ class WebRTCEngine:
             await asyncio.sleep(0.1)
 
     def _build_remote_sdp(self, offer_sdp: str, params: dict) -> str:
-        """
-        ✅ FIX: offer SDP ko parse karke usse mirror karo.
-        Har m= section offer se match karna zaroori hai.
-        Telegram ke ICE/DTLS params audio section mein inject karo.
-        Baaki sections (data channel etc.) reject karo (port=0).
-        """
         transport   = params.get("transport", {})
         fingerprint = transport.get("fingerprint", {})
         fp_hash     = fingerprint.get("hash", "sha-256")
@@ -150,10 +143,10 @@ class WebRTCEngine:
             if not line:
                 continue
             if line.startswith("m="):
-                if not session_done:
-                    session_done = True
-                else:
+                if session_done:
                     sections.append(current)
+                else:
+                    session_done = True
                 current = [line]
             elif session_done:
                 current.append(line)
@@ -161,7 +154,6 @@ class WebRTCEngine:
         if current:
             sections.append(current)
 
-        # Answer header (session-level)
         answer = [
             "v=0",
             "o=- 0 0 IN IP4 127.0.0.1",
@@ -169,12 +161,10 @@ class WebRTCEngine:
             "t=0 0",
         ]
 
-        # Har m= section ke liye answer banao
         for section in sections:
-            m_line = section[0]  # e.g. "m=audio 9 UDP/TLS/RTP/SAVPF 111"
+            m_line = section[0]
 
             if "audio" in m_line:
-                # Audio section: Telegram ke params inject karo
                 answer.append(m_line)
                 answer.append("c=IN IP4 0.0.0.0")
                 answer.append(f"a=ice-ufrag:{ufrag}")
@@ -183,19 +173,18 @@ class WebRTCEngine:
                     answer.append(f"a=fingerprint:{fp_hash} {fp_value}")
                 answer.append("a=setup:passive")
 
-                # Offer ke codec lines copy karo (rtpmap, fmtp, rtcp-fb)
                 for line in section[1:]:
                     if any(line.startswith(p) for p in (
                         "a=rtpmap", "a=fmtp", "a=rtcp-fb", "a=mid"
                     )):
                         answer.append(line)
 
+                answer.append("a=rtcp-mux")   # ✅ FIX 3: RTCP mux
                 answer.append("a=sendonly")
 
                 if ssrc:
                     answer.append(f"a=ssrc:{ssrc} cname:telegram")
 
-                # ICE candidates
                 for c in candidates:
                     answer.append(
                         f"a=candidate:{c.get('foundation', '1')} 1 "
@@ -207,12 +196,11 @@ class WebRTCEngine:
                     )
 
             else:
-                # Dusre sections (data channel etc.) reject karo
-                parts      = m_line.split()
-                parts[1]   = "0"          # port=0 means rejected
+                # Data channel / video — reject
+                parts    = m_line.split()
+                parts[1] = "0"
                 answer.append(" ".join(parts))
                 answer.append("c=IN IP4 0.0.0.0")
-                # mid line copy karo agar hai
                 for line in section[1:]:
                     if line.startswith("a=mid"):
                         answer.append(line)
