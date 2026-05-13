@@ -77,8 +77,17 @@ class SwitchableAudioTrack(MediaStreamTrack):
 
 class WebRTCEngine:
 
-    def __init__(self, stun_url: str = "stun:stun.l.google.com:19302"):
-        self.stun_url     = stun_url
+    def __init__(
+        self,
+        stun_url:      str = "stun:stun.l.google.com:19302",
+        turn_url:      str = "",
+        turn_username: str = "",
+        turn_password: str = "",
+    ):
+        self.stun_url      = stun_url
+        self.turn_url      = turn_url
+        self.turn_username = turn_username
+        self.turn_password = turn_password
         self._pc: Optional[RTCPeerConnection] = None
         self._track: Optional[SwitchableAudioTrack] = None
         self._connected   = False
@@ -116,7 +125,15 @@ class WebRTCEngine:
 
         self._dtls_fired = False
 
-        config   = RTCConfiguration(iceServers=[RTCIceServer(urls=[self.stun_url])])
+        ice_servers = [RTCIceServer(urls=[self.stun_url])]
+        if self.turn_url:
+            ice_servers.append(RTCIceServer(
+                urls=[self.turn_url],
+                username=self.turn_username,
+                credential=self.turn_password,
+            ))
+            logger.info(f"TURN server added: {self.turn_url}")
+        config   = RTCConfiguration(iceServers=ice_servers)
         self._pc = RTCPeerConnection(configuration=config)
 
         self._track = SwitchableAudioTrack()
@@ -386,12 +403,7 @@ class WebRTCEngine:
                 # RFC 5763 §5: when answer contains passive, offerer MUST be active.
                 # Previous "active" here meant "remote is active" → aiortc waited
                 # for a ClientHello that Telegram would never send → DTLS deadlock.
-                # New — parse Telegram's actual setup role and respond correctly
-                telegram_setup = transport.get("setup", "active")
-                local_setup = "active" if telegram_setup in ("passive", "holdconn") else "passive"
-                answer.append(f"a=setup:{local_setup}")
-              
-            
+                answer.append("a=setup:passive")
 
                 for line in section[1:]:
                     if any(line.startswith(p) for p in (
@@ -428,3 +440,4 @@ class WebRTCEngine:
                         answer.append(line)
 
         return "\r\n".join(answer) + "\r\n"
+  
