@@ -15,6 +15,7 @@ Fixes:
 import asyncio
 import json
 import logging
+import traceback
 from typing import Optional
 
 from pyrogram import Client
@@ -126,6 +127,7 @@ class GroupCallManager:
 
         except Exception as e:
             logger.error(f"connect_audio error: {e}")
+            logger.error(traceback.format_exc())
             return False
 
     async def leave(self):
@@ -279,3 +281,4 @@ class GroupCallManager:
             logger.warning(f"_parse_join_response error: {e}")
 
         return {}
+          
