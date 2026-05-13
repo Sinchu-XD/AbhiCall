@@ -12,7 +12,7 @@ import logging
 import os
 from dotenv import load_dotenv
 
-from pyrogram import Client
+from pyrogram import Client, idle
 
 from audio.pipeline import QueueManager
 from webrtc.engine import WebRTCEngine
@@ -77,10 +77,7 @@ async def main():
             logger.info(f"✅ Bot ready       : @{me_bot.username}")
             logger.info(f"✅ Assistant ready  : @{me_asst.first_name} ({me_asst.phone_number})")
             logger.info("🎵 /play <url ya song name> se shuru karo!")
-            await asyncio.gather(
-                bot.idle(),
-                assistant.idle(),
-            )
+            await idle()
 
 
 if __name__ == "__main__":
