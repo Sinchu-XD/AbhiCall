@@ -1,14 +1,14 @@
 """
 core/group_call.py — Final Fixed Version
 
-All fixes:
-  1. webrtc.prepare() called BEFORE JoinGroupCall → real DTLS fingerprint sent.
-  2. Real SSRC from aiortc offer SDP used (not random) → Telegram matches RTP.
-  3. ssrc-groups field added to join_params → required by some Telegram servers.
-  4. Unmute fires from _on_dtls_connected callback (after WebRTC state=connected)
-     NOT from a fixed sleep — ensures audio is actually flowing before unmuting.
+Fixes:
+  1. prepare() before JoinGroupCall → real DTLS fingerprint/SSRC sent to Telegram.
+  2. Real SSRC from aiortc offer SDP — Telegram matches RTP packets by SSRC.
+  3. ssrc-groups: [] in join_params — required by some Telegram server versions.
+  4. _on_dtls_connected callback — unmute fires ONLY after DTLS is complete and
+     SRTP is flowing, not after an arbitrary sleep.
   5. _parse_join_response checks UpdateGroupCallConnection.params directly.
-  6. _reconnecting flag always resets in finally block.
+  6. _reconnecting always resets in finally block.
   7. Max 5 reconnect attempts with exponential backoff.
 """
 
@@ -52,7 +52,6 @@ class GroupCallManager:
             await self.leave()
 
         self._chat_id = chat_id
-
         call = await self._get_active_call(chat_id)
         if not call:
             logger.error("Is chat mein koi active Voice Chat nahi hai!")
@@ -72,7 +71,7 @@ class GroupCallManager:
         try:
             self._pipeline = pipeline
 
-            # PHASE 1: Create WebRTC PC, get real credentials from aiortc offer SDP
+            # PHASE 1: Build real credentials from aiortc offer SDP
             ufrag, pwd, fingerprint, ssrc = await self.webrtc.prepare(pipeline)
 
             fp_parts = fingerprint.split(" ", 1)
@@ -115,8 +114,8 @@ class GroupCallManager:
             logger.info(f"✅ Joined VC in chat {self._chat_id}")
             self._joined = True
 
-            # PHASE 3: Complete WebRTC handshake (ICE + DTLS run async in background)
-            # _on_dtls_connected fires automatically when DTLS completes and unmutes
+            # PHASE 3: Complete WebRTC handshake (ICE + DTLS async)
+            # _on_dtls_connected fires when DTLS completes and triggers unmute
             ok = await self.webrtc.complete_connect(
                 group_call_params=self._transport_params,
             )
@@ -183,7 +182,9 @@ class GroupCallManager:
         self._reconnect_count += 1
 
         if self._reconnect_count > MAX_RECONNECT_ATTEMPTS:
-            logger.error(f"Max reconnect attempts ({MAX_RECONNECT_ATTEMPTS}) reached. Giving up.")
+            logger.error(
+                f"Max reconnect attempts ({MAX_RECONNECT_ATTEMPTS}) reached. Giving up."
+            )
             self._reconnecting = False
             return
 
@@ -203,7 +204,7 @@ class GroupCallManager:
 
             ok = await self.connect_audio(pipeline)
             if ok:
-                logger.info("✅ Auto-reconnect successful — audio will resume after DTLS.")
+                logger.info("✅ Auto-reconnect started — audio will resume after DTLS.")
                 self._reconnect_count = 0
             else:
                 logger.error("Auto-reconnect: connect_audio() failed")
@@ -218,11 +219,11 @@ class GroupCallManager:
     async def _on_dtls_connected(self):
         """
         Fired by WebRTCEngine when DTLS handshake completes
-        (WebRTC connectionState == 'connected').
+        (connectionState == 'connected', via event OR polling fallback).
 
-        KEY FIX: Only unmute AFTER DTLS is done and SRTP is flowing.
-        Unmuting before DTLS completes causes Telegram to see no live audio
-        and force-mute the participant — even manual admin unmute won't work.
+        KEY FIX: unmute fires ONLY after DTLS is done and SRTP is flowing.
+        Unmuting before DTLS completes means Telegram sees no audio stream
+        and force-mutes the participant — even manual admin unmute won't work.
         """
         if not self._joined or not self._call_ref:
             return
@@ -262,9 +263,8 @@ class GroupCallManager:
 
     def _parse_join_response(self, result) -> dict:
         """
-        Telegram returns UpdateGroupCallConnection which has `params` as a
-        direct field — NOT nested under `update.call.params`.
-        Logs all update types if parsing fails so we can debug further.
+        Telegram returns UpdateGroupCallConnection — params is a direct field,
+        not nested under update.call.params.
         """
         try:
             for update in result.updates:
