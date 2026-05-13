@@ -22,6 +22,7 @@ FRAME_SAMPLES = 960
 
 
 class OpusStreamTrack(MediaStreamTrack):
+class OpusStreamTrack(MediaStreamTrack):
     kind = "audio"
 
     def __init__(self, pipeline):
@@ -31,16 +32,17 @@ class OpusStreamTrack(MediaStreamTrack):
 
     async def recv(self) -> AudioFrame:
         loop = asyncio.get_event_loop()
-        opus_bytes = await loop.run_in_executor(
+        pcm_bytes = await loop.run_in_executor(       # ✅ naam bhi badla
             None, lambda: self._pipeline.get_frame(timeout=0.05)
         )
-        if opus_bytes is None:
-            opus_bytes = b"\xf8\xff\xfe"
+        if pcm_bytes is None:
+            pcm_bytes = b"\x00" * (FRAME_SAMPLES * 2 * 2)  # ✅ silence PCM, Opus nahi
 
         frame             = AudioFrame(format="s16", layout="stereo", samples=FRAME_SAMPLES)
         frame.sample_rate = SAMPLE_RATE
         frame.pts         = self._timestamp
         frame.time_base   = Fraction(1, SAMPLE_RATE)
+        frame.planes[0].update(pcm_bytes)             # ✅ YEH LINE MISSING THI — data daalo
         self._timestamp  += FRAME_SAMPLES
         return frame
 
