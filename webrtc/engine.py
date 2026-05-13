@@ -4,14 +4,13 @@ webrtc/engine.py — Final Fixed Version
 All fixes:
   1. prepare() creates PC + offer BEFORE JoinGroupCall — extracts real DTLS
      fingerprint, ICE credentials, and SSRC from the offer SDP.
-  2. SSRC extracted here and returned to group_call.py for use in join_params.
-  3. complete_connect() guards against empty remote fingerprints with clear error.
-  4. Callbacks capture `pc` as closure variable — no AttributeError when
-     self._pc becomes None during cleanup.
-  5. a=setup:active in fake answer — Telegram initiates DTLS (sends ClientHello),
-     aiortc is DTLS server (passive).
-  6. a=ice-lite in session SDP — tells aiortc it is ICE-controlling so it
-     sends USE-CANDIDATE and nominates the pair itself.
+  2. SSRC extracted from offer SDP (not random) — Telegram matches RTP by this.
+  3. complete_connect() guards against empty remote fingerprints.
+  4. Callbacks capture `pc` as closure variable — no AttributeError on cleanup.
+  5. a=setup:passive — aiortc is ICE-controlling so also DTLS client (initiator).
+  6. a=ice-lite — aiortc becomes ICE-controlling, sends USE-CANDIDATE itself.
+  7. set_connected_callback() — fires when DTLS completes so group_call can
+     unmute only after SRTP is actually flowing (not before).
 """
 
 import asyncio
@@ -84,7 +83,8 @@ class WebRTCEngine:
         self._pc          = None
         self._track: Optional[SwitchableAudioTrack] = None
         self._connected   = False
-        self._on_failed: Optional[Callable] = None
+        self._on_failed:    Optional[Callable] = None
+        self._on_connected: Optional[Callable] = None
 
         self._prepared_offer_sdp: Optional[str] = None
         self._prepared_fp:        Optional[str] = None
@@ -92,6 +92,14 @@ class WebRTCEngine:
 
     def set_reconnect_callback(self, callback: Callable):
         self._on_failed = callback
+
+    def set_connected_callback(self, callback: Callable):
+        """
+        Register a callback that fires when DTLS handshake completes
+        (WebRTC connectionState == 'connected'). Use this to unmute only
+        after SRTP audio is actually flowing.
+        """
+        self._on_connected = callback
 
     async def prepare(self, pipeline) -> tuple[str, str, str, int]:
         """
@@ -101,8 +109,8 @@ class WebRTCEngine:
         waits for ICE gathering, then extracts and returns:
             (ufrag, pwd, fingerprint, ssrc)
 
-        All four values come directly from aiortc's offer SDP and must be sent
-        to Telegram in JoinGroupCall exactly as-is.
+        All four values come directly from aiortc's offer SDP and must be
+        sent to Telegram in JoinGroupCall exactly as-is.
         """
         if self._pc:
             await self._cleanup_pc()
@@ -145,6 +153,7 @@ class WebRTCEngine:
         Registers event callbacks, builds the fake remote SDP from Telegram's
         transport params, and sets the remote description. ICE and DTLS then
         run asynchronously in the background.
+        When DTLS completes, the registered connected callback is fired.
         """
         if not self._pc or not self._prepared_offer_sdp:
             logger.error("complete_connect() called before prepare()!")
@@ -253,6 +262,8 @@ class WebRTCEngine:
             logger.info(f"WebRTC state: {state}")
             if state == "connected":
                 logger.info("✅ DTLS connected — SRTP audio is now flowing!")
+                if self._on_connected:
+                    asyncio.create_task(self._on_connected())
             if state in ("failed", "closed"):
                 self._connected = False
                 if self._on_failed:
@@ -281,7 +292,6 @@ class WebRTCEngine:
         pwd        = transport.get("pwd",   "telegram")
         candidates = transport.get("candidates", [])
 
-        # Parse m= sections out of the offer
         sections     = []
         current      = []
         session_done = False
@@ -305,9 +315,9 @@ class WebRTCEngine:
             "o=- 0 0 IN IP4 127.0.0.1",
             "s=-",
             "t=0 0",
-            # a=ice-lite tells aiortc the remote is ICE-lite (Telegram's server is).
-            # aiortc becomes ICE-controlling and sends USE-CANDIDATE itself,
-            # so ICE completes without waiting for Telegram to nominate.
+            # Telegram's server is ICE-lite — it never sends USE-CANDIDATE.
+            # This flag makes aiortc the ICE-controlling agent so it nominates
+            # the pair itself and ICE can complete.
             "a=ice-lite",
             "a=group:BUNDLE 0",
             "a=msid-semantic:WMS *",
@@ -323,8 +333,9 @@ class WebRTCEngine:
                 answer.append(f"a=ice-pwd:{pwd}")
                 if fp_value:
                     answer.append(f"a=fingerprint:{fp_hash} {fp_value}")
-                # a=setup:active → Telegram initiates DTLS (sends ClientHello).
-                # aiortc (ICE-controlling) becomes DTLS passive (server), waits.
+                # a=setup:passive → Telegram is DTLS server (waits for ClientHello).
+                # aiortc is ICE-controlling → also DTLS client → sends ClientHello.
+                # RFC 5763: the ICE-controlling full agent MUST be the DTLS client.
                 answer.append("a=setup:passive")
 
                 for line in section[1:]:
@@ -351,7 +362,6 @@ class WebRTCEngine:
                 answer.append("a=end-of-candidates")
 
             else:
-                # Disable non-audio m= sections
                 parts    = m_line.split()
                 parts[1] = "0"
                 answer.append(" ".join(parts))
