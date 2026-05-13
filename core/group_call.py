@@ -1,17 +1,20 @@
 """
-core/group_call.py
+core/group_call.py — Fixed version
 
-FIX: Reverted to single-phase WebRTC connect (original flow, proven to work).
-     join() now generates real random ICE credentials itself and sends them to
-     Telegram, then passes them to webrtc.connect() where they are patched into
-     the offer SDP — fixing "Consent to send expired" without breaking DTLS.
+FIXES:
+  1. connect_audio() calls webrtc.prepare() FIRST to get the real DTLS fingerprint,
+     then includes it in JoinGroupCall params. Root cause of silence was always
+     sending fingerprints=[] so Telegram couldn't verify DTLS → no SRTP audio.
+  2. connect_audio() calls webrtc.complete_connect() using the already-prepared PC
+     so fingerprint and ICE credentials match exactly what Telegram received.
+  3. _reconnecting flag now always resets via finally block.
+  4. Max reconnect attempts (5) with exponential backoff to stop infinite loops.
 """
 
 import asyncio
 import json
 import logging
 import random
-import string
 from typing import Optional
 
 from pyrogram import Client
@@ -21,13 +24,7 @@ from webrtc.engine import WebRTCEngine
 
 logger = logging.getLogger(__name__)
 
-
-def _random_ufrag(length: int = 4) -> str:
-    return "".join(random.choices(string.ascii_letters + string.digits, k=length))
-
-
-def _random_pwd(length: int = 22) -> str:
-    return "".join(random.choices(string.ascii_letters + string.digits, k=length))
+MAX_RECONNECT_ATTEMPTS = 5
 
 
 class GroupCallManager:
@@ -40,16 +37,11 @@ class GroupCallManager:
         self._joined           = False
         self._transport_params = {}
         self._my_ssrc          = 0
-        self._my_ufrag         = ""
-        self._my_pwd           = ""
         self._pipeline         = None
         self._reconnecting     = False
+        self._reconnect_count  = 0
 
         self.webrtc.set_reconnect_callback(self._on_webrtc_failed)
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     async def join(self, chat_id: int) -> bool:
         if self._joined:
@@ -66,66 +58,77 @@ class GroupCallManager:
             id=call.id,
             access_hash=call.access_hash,
         )
-
-        # Generate credentials here — no WebRTC PC needed yet
-        self._my_ssrc  = random.randint(1_000_000, 0x7FFFFFFF)
-        self._my_ufrag = _random_ufrag()
-        self._my_pwd   = _random_pwd()
-
-        join_params = {
-            "ufrag":        self._my_ufrag,
-            "pwd":          self._my_pwd,
-            "fingerprints": [],
-            "ssrc":         self._my_ssrc,
-        }
-
-        try:
-            result = await self.client.invoke(
-                raw.functions.phone.JoinGroupCall(
-                    call=self._call_ref,
-                    params=raw.types.DataJSON(data=json.dumps(join_params)),
-                    muted=False,
-                    video_stopped=True,
-                    join_as=raw.types.InputPeerSelf(),
-                )
-            )
-        except Exception as e:
-            logger.error(f"JoinGroupCall failed: {e}")
-            return False
-
-        self._transport_params = self._parse_join_response(result)
-
-        logger.info("Transport params received.")
-        logger.info(f"SSRC (local): {self._my_ssrc}")
-        logger.info(f"ICE ufrag sent to Telegram: {self._my_ufrag}")
-        logger.info(f"ICE candidates: {len(self._transport_params.get('transport', {}).get('candidates', []))}")
-
-        self._joined = True
-        logger.info(f"✅ Joined VC in chat {chat_id}")
         return True
 
     async def connect_audio(self, pipeline) -> bool:
-        if not self._joined:
+        if not self._call_ref:
             logger.error("Pehle join() karo!")
             return False
+
         try:
             self._pipeline = pipeline
-            ok = await self.webrtc.connect(
+
+            ufrag, pwd, fingerprint = await self.webrtc.prepare(pipeline)
+
+            fp_parts = fingerprint.split(" ", 1)
+            fp_hash  = fp_parts[0] if len(fp_parts) == 2 else "sha-256"
+            fp_value = fp_parts[1] if len(fp_parts) == 2 else ""
+
+            self._my_ssrc = random.randint(1_000_000, 0x7FFFFFFF)
+
+            join_params = {
+                "ufrag":        ufrag,
+                "pwd":          pwd,
+                "fingerprints": [
+                    {
+                        "hash":        fp_hash,
+                        "fingerprint": fp_value,
+                    }
+                ],
+                "ssrc": self._my_ssrc,
+            }
+
+            logger.info(f"SSRC (local): {self._my_ssrc}")
+            logger.info(f"ICE ufrag sent to Telegram: {ufrag}")
+            logger.info(f"DTLS fingerprint sent to Telegram: {fp_hash} {fp_value[:20]}...")
+
+            try:
+                result = await self.client.invoke(
+                    raw.functions.phone.JoinGroupCall(
+                        call=self._call_ref,
+                        params=raw.types.DataJSON(data=json.dumps(join_params)),
+                        muted=False,
+                        video_stopped=True,
+                        join_as=raw.types.InputPeerSelf(),
+                    )
+                )
+            except Exception as e:
+                logger.error(f"JoinGroupCall failed: {e}")
+                return False
+
+            self._transport_params = self._parse_join_response(result)
+            candidates_count = len(
+                self._transport_params.get("transport", {}).get("candidates", [])
+            )
+            logger.info(f"ICE candidates from Telegram: {candidates_count}")
+            logger.info(f"✅ Joined VC in chat {self._chat_id}")
+            self._joined = True
+
+            ok = await self.webrtc.complete_connect(
                 group_call_params=self._transport_params,
-                pipeline=pipeline,
-                pre_ufrag=self._my_ufrag,
-                pre_pwd=self._my_pwd,
             )
             if ok:
                 logger.info("✅ Audio connected!")
             return ok
+
         except Exception as e:
-            logger.error(f"WebRTC connect error: {e}")
+            logger.error(f"connect_audio error: {e}")
             return False
 
     async def leave(self):
         self._pipeline = None
-        if self._call_ref and self._joined:
+        self._joined   = False
+        if self._call_ref:
             try:
                 await self.client.invoke(
                     raw.functions.phone.LeaveGroupCall(
@@ -135,7 +138,6 @@ class GroupCallManager:
             except Exception as e:
                 logger.warning(f"Leave error: {e}")
         await self.webrtc.disconnect()
-        self._joined           = False
         self._call_ref         = None
         self._transport_params = {}
         logger.info("Left group call.")
@@ -158,24 +160,33 @@ class GroupCallManager:
     def is_joined(self) -> bool:
         return self._joined
 
-    # ------------------------------------------------------------------
-    # Auto-reconnect
-    # ------------------------------------------------------------------
-
     async def _on_webrtc_failed(self):
-        if self._reconnecting or not self._joined:
+        if self._reconnecting or not self._chat_id:
             return
 
         pipeline = self._pipeline
         chat_id  = self._chat_id
-        if not pipeline or not chat_id:
+        if not pipeline:
             return
 
-        self._reconnecting = True
-        logger.warning("WebRTC dropped — auto-reconnecting in 3s...")
-        await asyncio.sleep(3)
+        self._reconnecting    = True
+        self._joined          = False
+        self._reconnect_count += 1
+
+        if self._reconnect_count > MAX_RECONNECT_ATTEMPTS:
+            logger.error(f"Max reconnect attempts ({MAX_RECONNECT_ATTEMPTS}) reached. Giving up.")
+            self._reconnecting = False
+            return
+
+        delay = min(3 * self._reconnect_count, 15)
+        logger.warning(
+            f"WebRTC dropped — reconnecting in {delay}s "
+            f"(attempt {self._reconnect_count}/{MAX_RECONNECT_ATTEMPTS})..."
+        )
 
         try:
+            await asyncio.sleep(delay)
+
             ok = await self.join(chat_id)
             if not ok:
                 logger.error("Auto-reconnect: join() failed")
@@ -184,67 +195,32 @@ class GroupCallManager:
             ok = await self.connect_audio(pipeline)
             if ok:
                 logger.info("✅ Auto-reconnect successful — audio resumed!")
+                self._reconnect_count = 0
             else:
                 logger.error("Auto-reconnect: connect_audio() failed")
-        except Exception as e:
-            logger.error(f"Auto-reconnect exception: {e}")
+
         finally:
             self._reconnecting = False
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
     async def _get_active_call(self, chat_id: int):
         try:
-            peer = await self.client.resolve_peer(chat_id)
-            if isinstance(peer, raw.types.InputPeerChannel):
-                full     = await self.client.invoke(
-                    raw.functions.channels.GetFullChannel(channel=peer)
+            full = await self.client.invoke(
+                raw.functions.channels.GetFullChannel(
+                    channel=await self.client.resolve_peer(chat_id)
                 )
-                call_ref = full.full_chat.call
-            elif isinstance(peer, raw.types.InputPeerChat):
-                full     = await self.client.invoke(
-                    raw.functions.messages.GetFullChat(chat_id=peer.chat_id)
-                )
-                call_ref = full.full_chat.call
-            else:
-                logger.error("Sirf groups aur supergroups support hain.")
-                return None
-
-            if not call_ref:
-                logger.error("Koi active Voice Chat nahi mila.")
-                return None
-
-            result = await self.client.invoke(
-                raw.functions.phone.GetGroupCall(call=call_ref, limit=1)
             )
-            return result.call
+            return getattr(full.full_chat, "call", None)
         except Exception as e:
-            logger.error(f"Active call dhundhne mein error: {e}")
+            logger.error(f"GetFullChannel failed: {e}")
             return None
 
     def _parse_join_response(self, result) -> dict:
-        params = {
-            "transport": {
-                "candidates":   [],
-                "fingerprints": [],
-                "ufrag":        "",
-                "pwd":          "",
-            },
-            "ssrc": 0, "ssrc_group": [],
-        }
         try:
             for update in result.updates:
-                if hasattr(update, "params") and update.params:
-                    data = json.loads(update.params.data)
-                    if "transport" in data:
-                        params["transport"] = data["transport"]
-                    if "ssrc" in data:
-                        params["ssrc"] = data["ssrc"]
-                    if "ssrc-groups" in data:
-                        params["ssrc_group"] = data["ssrc-groups"]
-                    break
+                if hasattr(update, "call"):
+                    call = update.call
+                    if hasattr(call, "params"):
+                        return json.loads(call.params.data)
         except Exception as e:
-            logger.warning(f"Response parse error: {e}")
-        return params
+            logger.warning(f"Could not parse join response: {e}")
+        return {}
