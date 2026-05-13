@@ -395,6 +395,8 @@ class WebRTCEngine:
 
             "a=rtpmap:111 opus/48000/2\r\n"
 
+            "a=rtcp-mux\r\n"
+
             "a=fmtp:111 "
             "minptime=10;"
             "useinbandfec=1\r\n"
